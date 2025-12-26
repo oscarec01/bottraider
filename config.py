@@ -3,7 +3,7 @@ GEMINI_API_KEY = "TU_API_KEY" # Mantener por compatibilidad
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "mistral"
 
-# MAPEO DE SÍMBOLOS (códigos cortos -> nombres completos de Deriv)
+# MAPEO DE SÍMBOLOS  (códigos cortos -> nombres completos de Deriv)
 SYMBOL_MAPPING = {
     # Booms
     'B1000': 'Boom 1000 Index',
