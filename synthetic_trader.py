@@ -191,9 +191,8 @@ def run_synthetic_analysis(symbol):
     # 📊 REGISTRAR ANÁLISIS EN EXCEL
     try:
         from excel_logger import log_analysis
-        import MetaTrader5 as mt5
         
-        # Obtener precio actual para el registro
+        # Obtener precio actual para el registro (mt5 ya está importado globalmente)
         tick = mt5.symbol_info_tick(symbol)
         precio_actual = tick.ask if final_action == "COMPRA" else tick.bid if final_action == "VENTA" else 0
         
