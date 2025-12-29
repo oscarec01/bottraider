@@ -1,0 +1,21 @@
+# Dependencias para la aplicación PyQt6 del Bot de Trading
+
+# === GUI ===
+PyQt6>=6.6.0
+PyQt6-Qt6>=6.6.0
+PyQt6-sip>=13.6.0
+
+# === Trading y Análisis ===
+MetaTrader5>=5.0.45
+pandas>=2.0.0
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# === Requests para Ollama ===
+requests>=2.31.0
+
+# === Base de Datos ===
+# SQLite ya viene con Python
+
+# === Utilidades ===
+python-dotenv>=1.0.0  # Para variables de entorno (credenciales seguras)

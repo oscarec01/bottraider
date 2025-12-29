@@ -119,3 +119,37 @@ def analyze_price_action(symbol, context_data):
         logging.error(f"Error en análisis IA Senior: {e}")
     
     return {"señal": "ESPERAR", "error": "IA no disponible para confluencia"}
+
+def query_ollama(prompt: str, timeout: int = 30) -> str:
+    """
+    Wrapper genérico para consultar Ollama.
+    Usado por predicciones y análisis generales.
+    
+    Args:
+        prompt: El prompt a enviar
+        timeout: Timeout en segundos (default: 30)
+        
+    Returns:
+        La respuesta de Ollama como string
+    """
+    try:
+        url = config.OLLAMA_URL
+        model = config.OLLAMA_MODEL
+        
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "stream": False
+        }
+        
+        response = requests.post(url, json=payload, timeout=timeout)
+        
+        if response.status_code == 200:
+            return response.json().get("response", "").strip()
+        else:
+            logging.error(f"Ollama error: {response.status_code}")
+            return ""
+            
+    except Exception as e:
+        logging.error(f"Error en query_ollama: {e}")
+        return ""

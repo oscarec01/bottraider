@@ -1,3 +1,18 @@
+"""
+Indicadores técnicos optimizados para análisis en timeframe M5.
+
+Periodos de indicadores validados para M5:
+- RSI: 14 períodos
+- EMA: 9, 15, 28, 37 períodos
+- MACD: 17, 35, 9 períodos
+- Bollinger Bands: 20 períodos
+- Stochastic: 5, 4, 2 períodos
+- ATR: 14 períodos
+
+Todos los cálculos asumen que el DataFrame contiene velas M5.
+Mínimo requerido: 40 velas para EMA37.
+"""
+
 import pandas as pd
 import numpy as np
 
@@ -142,24 +157,51 @@ def calculate_volume_analysis(df, window=20):
         return "ESPERAR"
 
 def get_technical_summary(df_in):
-    if df_in is None or df_in.empty: return {"error": "Datos vacios"}
+    if df_in is None or df_in.empty: 
+        return {"error": "Datos vacios", "veredicto_matematico": "NEUTRAL", "confianza_matematica": 0}
+    
     df = df_in.copy()
     df.columns = [str(c).lower() for c in df.columns]
     
     try:
         c = df['close']
+        
+        # Verificar que hay suficientes datos
+        if len(c) < 40:  # Necesitamos al menos 40 velas para EMA37
+            return {
+                "error": "Datos insuficientes (necesita mínimo 40 velas)",
+                "veredicto_matematico": "NEUTRAL",
+                "confianza_matematica": 0
+            }
+        
         rsi_val = calculate_rsi(c).iloc[-1]
+        
+        # Manejar NaN en RSI
+        if pd.isna(rsi_val):
+            rsi_val = 50  # Valor neutral si es NaN
         
         # Estrategia 4 EMAs
         ema_signal = calculate_ema_alignment(c)
         
         ml, ms = calculate_macd(c)
         macd_val, signal_val = ml.iloc[-1], ms.iloc[-1]
+        
+        # Manejar NaN en MACD
+        if pd.isna(macd_val) or pd.isna(signal_val):
+            macd_val = 0
+            signal_val = 0
+        
         bb_u, bb_l = calculate_bollinger_bands(c)
         ha_trend = calculate_heikin_ashi(df)
         
         # New Experts
         stoch_signal, stoch_val = calculate_stochastic(df)
+        
+        # Manejar NaN en estocástico
+        if pd.isna(stoch_val):
+            stoch_val = 50
+            stoch_signal = "ESPERAR"
+        
         sr_signal = calculate_micro_sr(df)
         volatility_signal = calculate_volatility_analysis(df)
         volume_signal = calculate_volume_analysis(df)
@@ -167,14 +209,14 @@ def get_technical_summary(df_in):
         # Recomendaciones individuales
         experts = {
             "RSI": "COMPRA" if rsi_val < 35 else "VENTA" if rsi_val > 65 else "ESPERAR",
-            "EMA_CROSS": ema_signal,
-            "MACD": "COMPRA" if macd_val > signal_val else "VENTA",
+            "EMA_CROSS": ema_signal if ema_signal else "ESPERAR",
+            "MACD": "COMPRA" if macd_val > signal_val else "VENTA" if macd_val < signal_val else "ESPERAR",
             "BOLLINGER": "COMPRA" if c.iloc[-1] < bb_l.iloc[-1] else "VENTA" if c.iloc[-1] > bb_u.iloc[-1] else "ESPERAR",
-            "HEIKIN_ASHI": "COMPRA" if ha_trend == "ALCISTA" else "VENTA",
-            "STOCHASTIC": stoch_signal,
-            "MICRO_SR": sr_signal,
-            "VOLATILITY": volatility_signal,
-            "VOLUME": volume_signal
+            "HEIKIN_ASHI": "COMPRA" if ha_trend == "ALCISTA" else "VENTA" if ha_trend == "BAJISTA" else "ESPERAR",
+            "STOCHASTIC": stoch_signal if stoch_signal else "ESPERAR",
+            "MICRO_SR": sr_signal if sr_signal else "ESPERAR",
+            "VOLATILITY": volatility_signal if volatility_signal else "ESPERAR",
+            "VOLUME": volume_signal if volume_signal else "ESPERAR"
         }
         
         # Conteo para veredicto final
@@ -193,12 +235,37 @@ def get_technical_summary(df_in):
         
         return {
             "experts": experts,
-            "verdicto_matematico": veredicto,
-            "rsi": round(rsi_val, 1),
+            "veredicto_matematico": veredicto,
+            "rsi": round(float(rsi_val), 1),
             "macd": "ALCISTA" if macd_val > signal_val else "BAJISTA",
             "heikin_ashi": ha_trend,
-            "stoch_k": round(stoch_val, 1),
+            "stoch_k": round(float(stoch_val), 1),
             "confianza_matematica": confianza
         }
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        error_details = traceback.format_exc()
+        
+        # CRÍTICO: Siempre retornar estructura completa aunque haya error
+        return {
+            "error": str(e),
+            "error_details": error_details,
+            "veredicto_matematico": "NEUTRAL",
+            "confianza_matematica": 0,
+            "experts": {  # ← AGREGAR ESTO
+                "RSI": "ESPERAR",
+                "EMA_CROSS": "ESPERAR",
+                "MACD": "ESPERAR",
+                "BOLLINGER": "ESPERAR",
+                "HEIKIN_ASHI": "ESPERAR",
+                "STOCHASTIC": "ESPERAR",
+                "MICRO_SR": "ESPERAR",
+                "VOLATILITY": "ESPERAR",
+                "VOLUME": "ESPERAR"
+            },
+            "rsi": 50.0,
+            "macd": "NEUTRAL",
+            "heikin_ashi": "NEUTRAL",
+            "stoch_k": 50.0
+        }
+
