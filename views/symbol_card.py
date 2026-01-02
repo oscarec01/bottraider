@@ -293,35 +293,34 @@ class SymbolCard(QFrame):
     def update_analysis(self, analysis_result: dict):
         """Actualiza la card con los resultados del análisis"""
         try:
+            # Importar logger si no está disponible
+            from utils.logger import get_logger
+            logger = get_logger(__name__)
+            
             paso5 = analysis_result.get('paso5', {})
             action = paso5.get('decision', paso5.get('final_action', 'ESPERAR'))
             reasoning = paso5.get('razon', paso5.get('reasoning', 'Sin razón'))
             
-            # Obtener confianza del paso 4
-            paso4 = analysis_result.get('paso4', {})
-            confidence_raw = paso4.get('confianza', 0)
+            # Obtener confianza final (puede incluir ajuste de predicción)
+            final_confidence = paso5.get('final_confidence', 
+                                        analysis_result.get('confidence', 0))
             
-            if isinstance(confidence_raw, str):
-                confidence = int(''.join(filter(str.isdigit, confidence_raw)) or '0')
-            else:
-                confidence = int(confidence_raw)
+            # ========== ACTUALIZAR SEÑAL Y CONFIANZA ==========
+            self.update_signal(action, final_confidence)
             
-            # Actualizar label de análisis
-            signal_emoji = {
-                "COMPRA": "📈",
-                "VENTA": "📉",
-                "ESPERAR": "⏸"
-            }.get(action, "❓")
-            signal = action # Assuming 'action' is the signal
-            signal_colors = {
-                "COMPRA": "#2ecc71",
-                "VENTA": "#e74c3c",
-                "ESPERAR": "#f39c12"
-            }
-
-            analysis_text = f"{signal_emoji} {signal}   Conf: {confidence}%"
+            # ========== ACTUALIZAR DETALLES DE ANÁLISIS (Panel y Regresión) ==========
+            paso2 = analysis_result.get('paso2', {})
+            paso3 = analysis_result.get('paso3', {})
             
-            # ========== Agregar verificación de predicción anterior ==========
+            regression_text = f"{paso2.get('tendencia', 'N/A')} ({paso2.get('confianza', 0)}%)"
+            panel_text = f"{paso3.get('veredicto_matematico', 'N/A')} ({paso3.get('confianza_matematica', 0)}%)"
+            
+            self.update_analysis_details(regression_text, panel_text, analysis_result)
+            
+            # ========== ACTUALIZAR STATUS CON RAZONAMIENTO ==========
+            self.update_status(f"💭 {reasoning}")
+            
+            # ========== ACTUALIZAR PREDICCIÓN ANTERIOR ==========
             verification = analysis_result.get('prediction_verification', {})
             
             if verification.get('had_prediction'):
@@ -355,7 +354,7 @@ class SymbolCard(QFrame):
                         margin: 5px;
                     """)
             else:
-                # Primera predicción
+                # Primera predicción o sin predicción previa
                 self.prediction_label.setText("🔮 Predicción Anterior: Pendiente")
                 self.prediction_label.setStyleSheet("""
                     color: #7f8c8d; 
@@ -365,65 +364,15 @@ class SymbolCard(QFrame):
                     font-size: 10px;
                     margin: 5px;
                 """)
-            
-            # Agregar predicción actual al texto
-            prediction = analysis_result.get('prediction', {})
-            if prediction and prediction.get('prediction'):
-                pred_text = f"\n\n🎯 Pronóstico: {prediction.get('prediction', 'N/A')}"
-                pred_text += f"\n   Probabilidad: {prediction.get('probability', 0)}%"
-                pred_text += f"\n   Target: {prediction.get('target_price', 0)}"
-                analysis_text += pred_text
-            
-            self.analysis_label.setText(analysis_text)
-            self.analysis_label.setStyleSheet(f"color: {signal_colors.get(signal, '#7f8c8d')}; font-weight: bold; font-size: 12px;")
-            
-            # Actualizar acción con colores
-            if action == "COMPRA":
-                self.action_label.setText("📈 COMPRA")
-                self.action_label.setStyleSheet("color: #2ecc71; font-weight: bold; font-size: 16px;")
-            elif action == "VENTA":
-                self.action_label.setText("📉 VENTA")
-                self.action_label.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 16px;")
-            else:
-                self.action_label.setText("⏸ ESPERAR")
-                self.action_label.setStyleSheet("color: #f39c12; font-weight: bold; font-size: 16px;")
-            
-            # Actualizar confianza
-            self.confidence_label.setText(f"Confianza: {confidence}%")
-            
-            # Actualizar razón
-            self.analysis_label.setText(f"💭 {reasoning}")
-            
-            # ==================== ACTUALIZAR PREDICCIÓN ANTERIOR ====================
-            verification = analysis_result.get('prediction_verification', {})
-            
-            if verification.get('had_prediction'):
-                was_accurate = verification.get('was_accurate', False)
-                adjustment = verification.get('confidence_adjustment', 0)
-                
-                if was_accurate:
-                    self.prediction_label.setText(f"🔮 Predicción Anterior: ✅ ACERTADA ({adjustment:+d}%)")
-                    self.prediction_label.setStyleSheet("color: #2ecc71; font-size: 11px; font-weight: bold; padding: 5px; background-color: rgba(46, 204, 113, 0.1); border-radius: 3px;")
-                else:
-                    self.prediction_label.setText(f"🔮 Predicción Anterior: ❌ FALLIDA ({adjustment:+d}%)")
-                    self.prediction_label.setStyleSheet("color: #e74c3c; font-size: 11px; font-weight: bold; padding: 5px; background-color: rgba(231, 76, 60, 0.1); border-radius: 3px;")
-            else:
-                self.prediction_label.setText("🔮 Predicción Anterior: Pendiente")
-                self.prediction_label.setStyleSheet("color: #7f8c8d; font-size: 11px; font-weight: bold; padding: 5px;")
-            
-            # ==================== MOSTRAR PREDICCIÓN ACTUAL ====================
-            prediction = analysis_result.get('prediction')
-            if prediction:
-                pred_text = f"🎯 Pronóstico: {prediction.get('prediction', 'N/A')} "
-                pred_text += f"({prediction.get('probability', 0)}% prob.) "
-                pred_text += f"→ {prediction.get('target_price', 0)}"
-                
-                # Agregar a los detalles
-                current_text = self.analysis_label.text()
-                self.analysis_label.setText(f"{current_text}\n{pred_text}")
         
         except Exception as e:
-            logger.error(f"Error actualizando análisis en card: {e}")
+            # Usar print como fallback si logger falla
+            try:
+                from utils.logger import get_logger
+                logger = get_logger(__name__)
+                logger.error(f"Error actualizando análisis en card: {e}")
+            except:
+                print(f"Error actualizando análisis en card {self.symbol}: {e}")
     
     def update_price(self, price: float):
         """

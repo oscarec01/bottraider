@@ -4,16 +4,45 @@ Bot de trading automatizado con IA para operar en índices sintéticos de Deriv 
 
 ## 📁 Estructura del Proyecto
 
+### **Aplicación Principal (PyQt6 GUI - Recomendado)**
+
 ```
 bot_trader/
-├── auto_trader_10min.py      # 🎯 ARCHIVO PRINCIPAL DE EJECUCIÓN
-├── config.py                  # ⚙️ Configuración (credenciales, símbolos, lotes)
-├── synthetic_trader.py        # 🔍 Sistema de análisis de 5 pasos
-├── sentiment_analysis.py      # 🧠 Análisis IA con Ollama
+├── main.py                    # 🎯 PUNTO DE ENTRADA - Aplicación GUI PyQt6
+├── config.py                  # ⚙️ Configuración global
+│
+├── models/                    # 📦 Capa de Datos (MVC)
+│   ├── database.py           # Base de datos SQLite
+│   ├── trading_algorithm.py  # Sistema de análisis de 6 pasos
+│   ├── mt5_connection.py     # Conexión MetaTrader 5
+│   └── symbol_config.py      # Configuración de símbolos
+│
+├── views/                     # 🎨 Interfaz Gráfica (MVC)
+│   ├── main_window.py        # Ventana principal
+│   ├── symbol_card.py        # Card de cada símbolo
+│   ├── settings_dialog.py    # Configuración MT5 y Ollama
+│   ├── history_dialog.py     # Historial de operaciones
+│   └── analysis_details_dialog.py  # Detalles de análisis
+│
+├── controllers/               # 🎮 Lógica de Control (MVC)
+│   ├── main_controller.py    # Controlador principal
+│   └── symbol_controller.py  # Controlador por símbolo
+│
+└── workers/                   # ⚙️ Procesamiento Asíncrono
+    ├── trading_worker.py     # Worker de análisis automático
+    └── trailing_stop_manager.py  # Gestión de trailing stops
+```
+
+### **Archivos Legacy (Modo CLI - Opcional)**
+
+```
+bot_trader/
+├── auto_trader_10min.py      # ⏱️ Trader automático (sesión 10 min)
+├── synthetic_trader.py        # 🔍 Sistema de análisis legacy
 ├── technical_indicators.py    # 📊 Indicadores técnicos
 ├── prediction_models.py       # 📈 Regresión lineal
-├── mt5_executor.py           # 🔌 Conexión y ejecución MT5
-└── requirements.txt          # 📦 Dependencias
+├── sentiment_analysis.py      # 🧠 Análisis IA con Ollama
+└── mt5_executor.py           # 🔌 Ejecución de órdenes MT5
 ```
 
 ## 🚀 Inicio Rápido
@@ -28,6 +57,10 @@ bot_trader/
 ### 2. Instalar Dependencias
 
 ```bash
+# Dependencias para GUI (Recomendado)
+pip install -r requirements_gui.txt
+
+# O solo dependencias básicas (CLI)
 pip install -r requirements.txt
 ```
 
@@ -42,11 +75,33 @@ MT5_PASSWORD = "TuContraseña"   # Tu contraseña
 MT5_SERVER = "Deriv-Demo"       # O "Deriv-Server" para cuenta real
 ```
 
-### 4. Ejecutar el Bot
+### 4. Ejecutar la Aplicación
+
+#### **Opción A: Interfaz Gráfica (Recomendado)** 🖥️
+
+```bash
+python main.py
+```
+
+**Características de la GUI:**
+- 📊 Dashboard visual con cards por símbolo
+- ⚙️ Configuración interactiva de MT5 y Ollama
+- 📈 Historial de análisis y operaciones
+- 🔮 Visualización del sistema de predicción
+- ⏯️ Control Play/Stop por símbolo
+- 📝 Logs en tiempo real
+
+#### **Opción B: Modo CLI (Legacy)** 💻
 
 ```bash
 python auto_trader_10min.py
 ```
+
+**Características del CLI:**
+- ⏱️ Sesión automática de 10 minutos
+- 🔁 Análisis cada 2 minutos
+- 📊 Análisis de múltiples símbolos
+- 🤖 Ejecución automática de señales
 
 ## 🎯 Características del Auto Trader
 
@@ -57,9 +112,12 @@ python auto_trader_10min.py
 - **Activos**: Analiza todos los símbolos configurados en `config.ACTIVOS_PERMITIDOS`
 - **Monitoreo**: Si al finalizar hay órdenes abiertas, espera hasta que se cierren (máx. 30 min)
 
-### 🔍 Sistema de Análisis (5 Pasos)
+### 🔍 Sistema de Análisis (6 Pasos + Aprendizaje IA)
 
 ```
+VERIFICACIÓN PREVIA: Sistema de Aprendizaje
+  ↓ (Verifica predicción anterior y ajusta confianza ±5%)
+  ↓
 PASO 1: Identificación del Activo
   ↓
 PASO 2: Regresión Lineal (30 días H1)
@@ -70,15 +128,34 @@ PASO 3: Panel de Expertos Técnicos (M5)
   - Cruce de Medias EMA
   - Bandas de Bollinger
   - Heikin Ashi
+  - Estocástico
+  - Micro Soportes/Resistencias
+  - Análisis de Volatilidad
+  - Análisis de Volumen
   ↓
 PASO 4: Análisis de IA (Ollama)
   - Reglas específicas por tipo de activo
   - Búsqueda de confluencia técnica
+  - Confianza ajustada según historial de predicciones
   ↓
 PASO 5: Veredicto Final Consolidado
   - Validación de compatibilidad con tipo de activo
+  - Cálculo de confianza final
   - Ejecución automática si hay consenso
+  ↓
+PASO 6: PRONÓSTICO FUTURO (15 minutos)
+  - Genera predicción con Ollama
+  - Almacena en BD para verificación futura
+  - Ciclo de aprendizaje continuo
 ```
+
+### 🧠 Sistema de Aprendizaje Predictivo
+
+- **Verificación automática**: Antes de cada análisis, compara precio actual con predicción anterior
+- **Ajuste de confianza**: +5% si acertó, -5% si falló
+- **Indicador visual**: ✅ ACERTADA (verde) | ❌ FALLIDA (rojo) | ⏳ PENDIENTE (gris)
+- **Timeframe**: Próximas 3-5 velas M5 (aprox. 15 minutos)
+- **Tolerancia**: ±50 pips para considerar predicción acertada
 
 ### 🎲 Reglas por Tipo de Activo
 
