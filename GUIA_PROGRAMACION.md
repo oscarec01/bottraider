@@ -1,14 +1,22 @@
-# 📘 Guía de Programación - Bot Trader IA (ACTUALIZADA 2025-12-29)
+# 📘 Guía de Programación - Bot Trader IA (ACTUALIZADA 2026-01-03)
 
-> **Versión:** 2.0  
-> **Última actualización:** 2025-12-29  
+> **Versión:** 2.1  
+> **Última actualización:** 2026-01-03  
 > **Proyecto:** Bot de Trading Automatizado con IA + Sistema de Aprendizaje Predictivo
 
 ---
 
-## 🎯 CAMBIOS IMPORTANTES (Versión 2.0)
+## 🎯 CAMBIOS IMPORTANTES (Versión 2.1)
 
-### **NUEVAS FUNCIONALIDADES**
+### **NUEVAS FUNCIONALIDADES - Enero 2026**
+
+1. ✅ **Sistema de Proveedores de IA Múltiples** (NUEVO)
+   - Soporte para Ollama (Local) y Cloudflare Workers AI
+   - Selección de proveedor desde configuración
+   - Arquitectura modular con clase base `AIProvider`
+   - Test de conexión para validar credenciales
+
+### **FUNCIONALIDADES ANTERIORES (Versión 2.0)**
 
 1. ✅ **Sistema de Aprendizaje Predictivo** (Paso 6)
    - Pronóstico IA para próximos 15 minutos
@@ -25,6 +33,7 @@
    - Desconexión/reconexión limpia de MT5
    - Reinicio automático de workers activos
    - Sin congelamiento de UI
+
 
 ---
 
@@ -559,7 +568,175 @@ SymbolCard.update_analysis(analysis_result)  # Maneja predicción
 
 ---
 
+---
+
+## 🤖 Sistema de Proveedores de IA (v2.1)
+
+### **Arquitectura Modular**
+
+El sistema ahora soporta múltiples proveedores de IA a través de una arquitectura modular:
+
+```python
+# models/ai_provider.py
+
+class AIProvider(ABC):
+    """Clase base abstracta para todos los proveedores"""
+    @abstractmethod
+    def query(self, prompt: str, timeout: int, format_json: bool) -> str:
+        pass
+    
+    @abstractmethod
+    def is_available(self) -> bool:
+        pass
+    
+    @abstractmethod
+    def get_name(self) -> str:
+        pass
+```
+
+### **Proveedores Disponibles**
+
+#### **1. Ollama (Local)**
+
+- **Ventajas:** 
+  - Sin costos de API
+  - Privacidad total
+  - Baja latencia
+
+- **Desventajas:**
+  - Requiere instalación local
+  - Consume recursos del PC
+
+- **Configuración:**
+  ```python
+  ollama_url = "http://localhost:11434/api/generate"
+  ollama_model = "mistral"  # o "llama3", "gemma", etc.
+  ```
+
+#### **2. Cloudflare Workers AI**
+
+- **Ventajas:**
+  - No requiere infraestructura local
+  - Modelos optimizados
+  - Alta disponibilidad
+
+- **Desventajas:**
+  - Requiere conexión a internet
+  - Costos por uso (muy bajo)
+
+- **Configuración:**
+  ```python
+  cloudflare_account_id = "tu_account_id"
+  cloudflare_api_token = "tu_api_token"
+  cloudflare_model = "@cf/meta/llama-3-8b-instruct"
+  ```
+
+### **Modelos Recomendados por Proveedor**
+
+**Ollama:**
+- `mistral` - Rápido y eficiente (recomendado)
+- `llama3` - Más potente, requiere más recursos
+- `gemma` - Bueno para análisis rápidos
+
+**Cloudflare Workers AI:**
+- `@cf/meta/llama-3-8b-instruct` - Mejor balance (recomendado)
+- `@cf/mistral/mistral-7b-instruct-v0.1` - Compatible con Ollama Mistral
+- `@cf/meta/llama-2-7b-chat-int8` - Optimizado para inferencia rápida
+- `@cf/qwen/qwen1.5-7b-chat-awq` - Alternativa eficiente
+
+### **Uso en el Código**
+
+```python
+# sentiment_analysis.py
+
+def analyze_price_action(symbol, context_data):
+    # El sistema selecciona automáticamente el proveedor configurado
+    from models.database import Database
+    from models.ai_provider import get_ai_provider
+    
+    db = Database()
+    provider = get_ai_provider(db)  # ← Obtiene proveedor configurado
+    
+    logging.info(f"🤖 Usando proveedor: {provider.get_name()}")
+    
+    # Verificar disponibilidad
+    if not provider.is_available():
+        return fallback_response
+    
+    # Consultar IA
+    response = provider.query(prompt, timeout=60, format_json=True)
+    # ...
+```
+
+### **Configuración desde UI**
+
+1. **Abrir Configuración:** Menú → ⚙️ Configuración
+2. **Pestaña "🤖 AI Configuration"**
+3. **Seleccionar Proveedor:**
+   - "Ollama (Local)" o "Cloudflare Workers AI"
+4. **Configurar Credenciales:**
+   - **Ollama:** URL y modelo
+   - **Cloudflare:** Account ID, API Token, modelo
+5. **Test de Conexión:** Usar botón "Test Connection"
+6. **Guardar:** Aplicar cambios
+
+### **Factory Pattern**
+
+El sistema usa un patrón factory para instanciar el proveedor correcto:
+
+```python
+def get_ai_provider(db_instance) -> AIProvider:
+    provider_name = db_instance.get_setting('ai_provider', 'ollama')
+    
+    if provider_name == 'cloudflare':
+        return CloudflareProvider(
+            account_id=db_instance.get_setting('cloudflare_account_id'),
+            api_token=db_instance.get_setting('cloudflare_api_token'),
+            model=db_instance.get_setting('cloudflare_model')
+        )
+    else:
+        return OllamaProvider(
+            url=db_instance.get_setting('ollama_url'),
+            model=db_instance.get_setting('ollama_model')
+        )
+```
+
+### **Backward Compatibility**
+
+- `query_ollama()` se mantiene por compatibilidad legacy
+- Por defecto usa Ollama si no se configura proveedor
+- Usuarios existentes no verán cambios
+
+### **Handling de Errores**
+
+```python
+try:
+    provider = get_ai_provider(db)
+    
+    if not provider.is_available():
+        logger.warning(f"⚠️ Proveedor {provider.get_name()} no disponible")
+        return default_prediction
+    
+    response = provider.query(prompt, timeout=60)
+    
+except Exception as e:
+    logger.error(f"Error en proveedor IA: {e}")
+    return default_prediction
+```
+
+### **Logging**
+
+El sistema registra el proveedor utilizado en cada análisis:
+
+```
+🤖 Usando proveedor de IA: Cloudflare (llama-3-8b-instruct)
+✅ Respuesta recibida (length: 245)
+```
+
+---
+
 ## 🎓 Mejores Prácticas (Actualizadas)
+
 
 1. **Siempre usar nueva firma de save_analysis**
 2. **Verificar predicción ANTES de Paso 1**
@@ -572,18 +749,33 @@ SymbolCard.update_analysis(analysis_result)  # Maneja predicción
 
 ---
 
-## 🚀 Checklist Pre-Deploy
+## 🚀 Checklist Pre-Deploy (v2.1)
 
+### Base de Datos y Core
 - [ ] BD tiene nueva estructura (prediction, accuracy, adjustment)
 - [ ] Todos los save_analysis usan nueva firma
-- [ ] UI tiene prediction_label
-- [ ] Ollama está corriendo localmente
 - [ ] Settings se guardan sin freeze
-- [ ] Boom/Crash valida señales correctamente
-- [ ] Logs muestran Paso 6
+
+### UI y Visualización
+- [ ] UI tiene prediction_label
 - [ ] Primera ejecución muestra "Pendiente"
 - [ ] Segunda ejecución muestra ✅ o ❌
+- [ ] Logs muestran Paso 6
+
+### Sistema de IA (NUEVO)
+- [ ] Selector de proveedor visible en Settings
+- [ ] Ollama está corriendo localmente (si se usa)
+- [ ] Credenciales de Cloudflare configuradas (si se usa)
+- [ ] Test de conexión funciona para proveedor seleccionado
+- [ ] Logs muestran proveedor en uso: `🤖 Usando proveedor: ...`
+- [ ] Sistema cambia entre proveedores correctamente
+
+### Trading Logic
+- [ ] Boom/Crash valida señales correctamente
+- [ ] Modo scalper funciona apropiadamente
+- [ ] SL/TP se calculan correctamente
 
 ---
 
-**Fin de Guía v2.0** 🎉
+**Fin de Guía v2.1** 🎉
+

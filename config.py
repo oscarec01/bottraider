@@ -1,7 +1,17 @@
-# Configuración de IA
+# Configuración de IA - AI Provider Selection
+AI_PROVIDER = "ollama"  # Opciones: "ollama" o "cloudflare"
+
+# Ollama Configuration (Local)
 GEMINI_API_KEY = "TU_API_KEY" # Mantener por compatibilidad
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "mistral"
+
+# Cloudflare Workers AI Configuration
+CLOUDFLARE_ACCOUNT_ID = "8f296c9441738764c450954bfbcbc543"
+CLOUDFLARE_API_TOKEN = "gNP7mxp3g1glmJq8-Qi59fYm6rnzeDdCyJyHTp4N"
+CLOUDFLARE_MODEL = "@cf/mistral/mistral-7b-instruct-v0.1"
+CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4"
+
 
 # MAPEO DE SÍMBOLOS  (códigos cortos -> nombres completos de Deriv)
 SYMBOL_MAPPING = {

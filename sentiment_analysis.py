@@ -9,10 +9,23 @@ def analyze_price_action(symbol, context_data):
     """
     Analizador de IA Senior optimizado para encontrar confluencia técnica.
     Adaptado con REGLAS ESPECÍFICAS por tipo de símbolo.
+    Ahora soporta múltiples proveedores de IA (Ollama / Cloudflare).
     """
     try:
-        url = config.OLLAMA_URL
-        model = config.OLLAMA_MODEL
+        # Importar sistema de proveedores
+        from models.database import Database
+        from models.ai_provider import get_ai_provider
+        
+        # Obtener proveedor configurado
+        db = Database()
+        provider = get_ai_provider(db)
+        
+        logging.info(f"🤖 Usando proveedor de IA: {provider.get_name()}")
+        
+        # NO verificar disponibilidad aquí - intentar query directamente
+        # La verificación de disponibilidad puede fallar por timeouts temporales
+        # Es mejor intentar la query real y manejar el error si ocurre
+
         
         # Identificar tipo de símbolo y reglas específicas
         symbol_upper = symbol.upper()
@@ -69,60 +82,97 @@ def analyze_price_action(symbol, context_data):
             ℹ️ REGLA GENÉRICA: Analiza todos los indicadores y emite la señal más probable.
             """
         
-        prompt = f"""
-        Estás analizando {symbol} ({tipo_activo}).
+        prompt = f"""Analiza {symbol} ({tipo_activo}) y emite una señal de trading.
+
+{reglas_especificas}
+
+CONTEXTO TÉCNICO:
+{context_data}
+
+INSTRUCCIONES:
+1. Si Regresión R² > 70%, prioriza esa dirección
+2. Busca confluencia entre indicadores (MACD, RSI, Heikin Ashi)
+3. Solo emite COMPRA/VENTA si hay confluencia clara
+
+Responde SOLO en este formato JSON exacto:
+{{
+    "señal": "COMPRA/VENTA/ESPERAR",
+    "confianza": 75,
+    "razon": "Explicación breve (max 50 palabras)"
+}}
+"""
         
-        {reglas_especificas}
+        # Consultar proveedor con timeout de 60s
+        ia_text = provider.query(prompt, timeout=60, format_json=True)
         
-        Actúa como un Trader Senior de Deriv experto en Índices Sintéticos.
-        Tu objetivo es encontrar CONFLUENCIA técnica para emitir señales decisivas.
-        
-        CONTEXTO TÉCNICO DE {symbol}:
-        {context_data}
-        
-        REGLAS DE DECISIÓN GENERALES:
-        1. PRIORIDAD MACRO: Si la Regresión tiene un R2 > 70%, dale prioridad absoluta a esa dirección (respetando las reglas específicas del símbolo).
-        2. GATILLOS: Considera el RSI y el MACD como gatillos de entrada. 
-        3. CONFLUENCIA: Si la regresión es ALCISTA y el MACD o Heikin Ashi confirman esa dirección, la señal DEBE ser COMPRA (si está permitido para este símbolo). Lo mismo para VENTAS.
-        4. Agresividad: No seas conservador sin motivo. Si la mayoría de indicadores (MACD, Medias, Heikin Ashi) están a favor de la tendencia macro, emite la señal.
-        
-        Responde ESTRICTAMENTE en este formato JSON para que el bot pueda procesarlo:
-        {{
-            "señal": "COMPRA/VENTA/ESPERAR",
-            "confianza": "0-100",
-            "razon": "Breve explicación técnica de la confluencia encontrada"
-        }}
-        """
-        
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False,
-            "format": "json"
-        }
-        
-        response = requests.post(url, json=payload, timeout=60)
-        
-        if response.status_code == 200:
-            ia_text = response.json().get("response", "").strip()
+        if ia_text:
+            # LOGGING: Mostrar respuesta completa para debug
+            logging.info(f"📥 Respuesta IA completa ({len(ia_text)} chars): {ia_text[:200]}...")
+            
             # Extracción robusta de JSON
             start = ia_text.find('{')
             end = ia_text.rfind('}') + 1
             if start != -1 and end != 0:
                 json_str = ia_text[start:end]
-                return json.loads(json_str)
+                logging.debug(f"🔍 JSON extraído: {json_str}")
+                result = json.loads(json_str)
+                
+                # CRÍTICO: Asegurar SIEMPRE ambas claves (español e inglés)
+                # Español → Inglés
+                if 'señal' in result and 'signal' not in result:
+                    result['signal'] = result['señal']
+                # Inglés → Español  
+                if 'signal' in result and 'señal' not in result:
+                    result['señal'] = result['signal']
+                
+                # Confianza
+                if 'confianza' in result:
+                    result['confidence'] = int(result['confianza'])
+                if 'confidence' in result:
+                    result['confianza'] = int(result['confidence'])
+                
+                # Razón/Reason
+                if 'razon' in result and 'reason' not in result:
+                    result['reason'] = result['razon']
+                if 'reason' in result and 'razon' not in result:
+                    result['razon'] = result['reason']
+                
+                # Metadata del proveedor
+                result['provider'] = provider.get_name()
+                
+                return result
+            
+            # Si no encuentra JSON, intentar parsear directo
             return json.loads(ia_text)
         else:
-            logging.error(f"Fallo conexión Ollama: {response.status_code}")
+            logging.error(f"Respuesta vacía de {provider.get_name()}")
             
     except Exception as e:
-        logging.error(f"Error en análisis IA Senior: {e}")
+        logging.error(f"Error en análisis IA Senior: {e}", exc_info=True)
     
-    return {"señal": "ESPERAR", "error": "IA no disponible para confluencia"}
+    # CRÍTICO: Return de error debe incluir AMBAS claves
+    return {
+        "señal": "ESPERAR", 
+        "signal": "ESPERAR",
+        "confianza": 0, 
+        "confidence": 0,
+        "razon": "IA no disponible para confluencia",
+        "reason": "AI not available for confluence",
+        "error": "IA no disponible para confluencia"
+    }
+
 
 def query_ollama(prompt: str, timeout: int = 30) -> str:
     """
-    Wrapper genérico para consultar Ollama.
+    DEPRECATED: Usar query_ai() en su lugar.
+    Mantenido por compatibilidad con código legacy.
+    """
+    return query_ai(prompt, timeout)
+
+
+def query_ai(prompt: str, timeout: int = 30) -> str:
+    """
+    Wrapper genérico para consultar el proveedor de IA configurado.
     Usado por predicciones y análisis generales.
     
     Args:
@@ -130,26 +180,21 @@ def query_ollama(prompt: str, timeout: int = 30) -> str:
         timeout: Timeout en segundos (default: 30)
         
     Returns:
-        La respuesta de Ollama como string
+        La respuesta del IA como string
     """
     try:
-        url = config.OLLAMA_URL
-        model = config.OLLAMA_MODEL
+        # Importar sistema de proveedores
+        from models.database import Database
+        from models.ai_provider import get_ai_provider
         
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": False
-        }
+        # Obtener proveedor configurado
+        db = Database()
+        provider = get_ai_provider(db)
         
-        response = requests.post(url, json=payload, timeout=timeout)
-        
-        if response.status_code == 200:
-            return response.json().get("response", "").strip()
-        else:
-            logging.error(f"Ollama error: {response.status_code}")
-            return ""
+        # Consultar proveedor
+        return provider.query(prompt, timeout=timeout)
             
     except Exception as e:
-        logging.error(f"Error en query_ollama: {e}")
+        logging.error(f"Error en query_ai: {e}")
         return ""
+

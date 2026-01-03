@@ -234,8 +234,8 @@ class TradingAlgorithm:
             }
         """
         try:
-            # Import Ollama client from sentiment_analysis module
-            from sentiment_analysis import query_ollama
+            # Import AI query function (supports multiple providers: Ollama, Cloudflare)
+            from sentiment_analysis import query_ai
             
             if recent_data is None or recent_data.empty:
                 return self._get_default_prediction(recent_data)
@@ -274,7 +274,7 @@ Responde SOLO en formato JSON (sin markdown):
             
             def call_ollama():
                 try:
-                    response_container['text'] = query_ollama(prompt)
+                    response_container['text'] = query_ai(prompt)
                 except Exception as e:
                     response_container['error'] = str(e)
             
@@ -517,12 +517,15 @@ Responde SOLO en formato JSON (sin markdown):
         reg_dir = result['paso2'].get('tendencia', 'NEUTRAL')
         reg_conf = result['paso2'].get('confianza', 0)
         
-        ai_signal = result['paso4'].get('signal', 'ESPERAR')
-        ai_conf = result['paso4'].get('confidence', 0)
+        # CRÍTICO: Soportar ambas claves (español e inglés) para compatibilidad
+        paso4_data = result.get('paso4', {})
+        ai_signal = paso4_data.get('signal', paso4_data.get('señal', 'ESPERAR'))
+        ai_conf = paso4_data.get('confidence', paso4_data.get('confianza', 0))
         
         # VALIDACIÓN CRÍTICA: Umbral de confianza desde BD
         min_confidence = self.db.get_setting('min_confidence_ia', 70)
         logger.debug(f"[DEBUG] Confianza calculada: {ai_conf}% | Umbral requerido: {min_confidence}%")
+
         
         # ==================== VALIDACIÓN ESPECIAL: Dirección en Modo Scalper ====================
         scalper_mode = self.db.get_setting('scalper_mode', False)
@@ -569,6 +572,10 @@ Responde SOLO en formato JSON (sin markdown):
                 
                 return result
         
+        # CRÍTICO: Inicializar variables ANTES de condicionales
+        final_action = "ESPERAR"  # Default seguro
+        razon_final = "Sin señal clara"  # Default
+        
         # Regla 0: Validar confianza mínima (PRIORITARIA)
         if ai_conf < min_confidence:
             final_action = "ESPERAR"
@@ -576,7 +583,7 @@ Responde SOLO en formato JSON (sin markdown):
             logger.warning(f"⚠️ {razon_final}")
         
         # Regla 1: Oposición directa → BLOQUEO
-        if (reg_dir == "ALCISTA" and ai_signal == "VENTA") or \
+        elif (reg_dir == "ALCISTA" and ai_signal == "VENTA") or \
            (reg_dir == "BAJISTA" and ai_signal == "COMPRA"):
             final_action = "ESPERAR"
             razon_final = "BLOQUEO: IA y Regresión en direcciones OPUESTAS."
@@ -595,6 +602,11 @@ Responde SOLO en formato JSON (sin markdown):
         elif ai_signal == "VENTA" and panel_dir == "BAJISTA":
             final_action = "VENTA"
             razon_final = "EJECUCIÓN: Consenso IA y Panel Técnico."
+        
+        # Default: Si no se cumple ninguna regla, mantener ESPERAR
+        else:
+            final_action = "ESPERAR"
+            razon_final = f"Sin confluencia clara. IA: {ai_signal} ({ai_conf}%), Regresión: {reg_dir}, Panel: {panel_dir}"
         
         # Validación de compatibilidad con tipo de activo
         is_valid, validation_msg = self._validate_signal_compatibility(final_action, symbol)

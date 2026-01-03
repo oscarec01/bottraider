@@ -306,35 +306,139 @@ class SettingsDialog(QDialog):
         return widget
     
     def _create_ollama_tab(self):
-        """Crea la pestaña de configuración de Ollama"""
+        """Crea la pestaña de configuración de IA (Ollama / Cloudflare)"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
         
-        # Configuración de Ollama
-        ollama_group = QGroupBox("Configuración de Ollama")
-        ollama_layout = QFormLayout(ollama_group)
+        # Selector de proveedor
+        provider_group = QGroupBox("🤖 Proveedor de IA")
+        provider_layout = QFormLayout(provider_group)
+        
+        self.ai_provider_combo = QComboBox()
+        self.ai_provider_combo.addItems(["Ollama (Local)", "Cloudflare Workers AI"])
+        self.ai_provider_combo.currentIndexChanged.connect(self._on_provider_changed)
+        provider_layout.addRow("Proveedor:", self.ai_provider_combo)
+        
+        self.enable_ia = QCheckBox("Habilitar Análisis con IA")
+        self.enable_ia.setChecked(True)
+        provider_layout.addRow("Estado:", self.enable_ia)
+        
+        layout.addWidget(provider_group)
+        
+        # ===== CONFIGURACIÓN OLLAMA =====
+        self.ollama_group = QGroupBox("⚙️ Configuración de Ollama")
+        ollama_layout = QFormLayout(self.ollama_group)
         
         self.ollama_url = QLineEdit()
         self.ollama_url.setText("http://localhost:11434/api/generate")
         ollama_layout.addRow("URL de Ollama:", self.ollama_url)
         
         self.ollama_model = QComboBox()
-        self.ollama_model.addItems(["mistral", "llama2", "codellama", "gemma"])
+        self.ollama_model.addItems(["mistral", "llama2", "llama3", "codellama", "gemma"])
         ollama_layout.addRow("Modelo:", self.ollama_model)
         
-        self.enable_ia = QCheckBox("Habilitar Análisis con IA")
-        self.enable_ia.setChecked(True)
-        ollama_layout.addRow("Estado:", self.enable_ia)
+        ollama_info = QLabel("ℹ️ Asegúrate de que Ollama esté corriendo con 'ollama serve'")
+        ollama_info.setStyleSheet("color: #aaa; padding: 5px;")
+        ollama_info.setWordWrap(True)
+        ollama_layout.addRow(ollama_info)
         
-        layout.addWidget(ollama_group)
+        layout.addWidget(self.ollama_group)
         
-        # Info
-        info = QLabel("ℹ️ Asegúrate de que Ollama esté corriendo con 'ollama serve'")
-        info.setStyleSheet("color: #aaa; padding: 10px;")
-        layout.addWidget(info)
+        # ===== CONFIGURACIÓN CLOUDFLARE =====
+        self.cloudflare_group = QGroupBox("☁️ Configuración de Cloudflare Workers AI")
+        cloudflare_layout = QFormLayout(self.cloudflare_group)
+        
+        self.cloudflare_account_id = QLineEdit()
+        self.cloudflare_account_id.setPlaceholderText("Ej: 8f296c9441738764c450954bfbcbc543")
+        cloudflare_layout.addRow("Account ID:", self.cloudflare_account_id)
+        
+        self.cloudflare_api_token = QLineEdit()
+        self.cloudflare_api_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.cloudflare_api_token.setPlaceholderText("Tu API Token de Cloudflare")
+        cloudflare_layout.addRow("API Token:", self.cloudflare_api_token)
+        
+        self.cloudflare_model = QComboBox()
+        self.cloudflare_model.addItems([
+            "@cf/mistral/mistral-7b-instruct-v0.1",
+            "@cf/meta/llama-3-8b-instruct",
+            "@cf/meta/llama-2-7b-chat-int8",
+            "@cf/qwen/qwen1.5-7b-chat-awq"
+        ])
+        self.cloudflare_model.setToolTip("Modelo de IA a utilizar en Cloudflare Workers")
+        cloudflare_layout.addRow("Modelo:", self.cloudflare_model)
+        
+        # Botón de test para Cloudflare
+        self.test_cloudflare_btn = QPushButton("🔍 Test Cloudflare Connection")
+        self.test_cloudflare_btn.clicked.connect(self._test_cloudflare_connection)
+        cloudflare_layout.addRow(self.test_cloudflare_btn)
+        
+        cloudflare_info = QLabel("ℹ️ Obtén tus credenciales en: Cloudflare Dashboard → Workers & Pages → AI")
+        cloudflare_info.setStyleSheet("color: #aaa; padding: 5px;")
+        cloudflare_info.setWordWrap(True)
+        cloudflare_layout.addRow(cloudflare_info)
+        
+        layout.addWidget(self.cloudflare_group)
         
         layout.addStretch()
         return widget
+    
+    def _on_provider_changed(self, index):
+        """Maneja el cambio de proveedor de IA"""
+        if index == 0:  # Ollama
+            self.ollama_group.setVisible(True)
+            self.cloudflare_group.setVisible(False)
+        else:  # Cloudflare
+            self.ollama_group.setVisible(False)
+            self.cloudflare_group.setVisible(True)
+    
+    def _test_cloudflare_connection(self):
+        """Prueba la conexión a Cloudflare Workers AI"""
+        account_id = self.cloudflare_account_id.text().strip()
+        api_token = self.cloudflare_api_token.text().strip()
+        model = self.cloudflare_model.currentText()
+        
+        if not account_id or not api_token:
+            QMessageBox.warning(
+                self,
+                "Validación",
+                "Por favor ingresa el Account ID y API Token de Cloudflare"
+            )
+            return
+        
+        self.test_cloudflare_btn.setEnabled(False)
+        self.test_cloudflare_btn.setText("Probando...")
+        
+        try:
+            from models.ai_provider import CloudflareProvider
+            
+            provider = CloudflareProvider(account_id, api_token, model)
+            
+            if provider.is_available():
+                QMessageBox.information(
+                    self,
+                    "✅ Conexión Exitosa",
+                    f"Conectado a Cloudflare Workers AI correctamente.\n\n"
+                    f"Modelo: {model}\n"
+                    f"El servicio está disponible y listo para usar."
+                )
+            else:
+                QMessageBox.critical(
+                    self,
+                    "❌ Error de Conexión",
+                    "No se pudo conectar a Cloudflare Workers AI.\n\n"
+                    "Verifica:\n"
+                    "• Account ID correcto\n"
+                    "• API Token válido con permisos de Workers AI\n"
+                    "• Conexión a Internet activa"
+                )
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Excepción al conectar:\n{str(e)}")
+        
+        finally:
+            self.test_cloudflare_btn.setEnabled(True)
+            self.test_cloudflare_btn.setText("🔍 Test Cloudflare Connection")
+
     
     def _load_current_settings(self):
         """Carga los ajustes actuales desde la BD"""
@@ -380,6 +484,13 @@ class SettingsDialog(QDialog):
             self.trailing_activation.setValue(self.db.get_setting('trailing_activation', 300))  # Default 300 para Boom/Crash
             self.trailing_distance.setValue(self.db.get_setting('trailing_distance', 150))  # Default 150 para Boom/Crash
             
+            # AI Provider
+            ai_provider = self.db.get_setting('ai_provider', 'ollama')
+            if ai_provider == 'cloudflare':
+                self.ai_provider_combo.setCurrentIndex(1)
+            else:
+                self.ai_provider_combo.setCurrentIndex(0)
+            
             # Ollama
             self.ollama_url.setText(self.db.get_setting('ollama_url', 'http://localhost:11434/api/generate'))
             model = self.db.get_setting('ollama_model', 'mistral')
@@ -387,6 +498,18 @@ class SettingsDialog(QDialog):
             if idx >= 0:
                 self.ollama_model.setCurrentIndex(idx)
             self.enable_ia.setChecked(self.db.get_setting('enable_ia', True))
+            
+            # Cloudflare
+            self.cloudflare_account_id.setText(self.db.get_setting('cloudflare_account_id', ''))
+            self.cloudflare_api_token.setText(self.db.get_setting('cloudflare_api_token', ''))
+            cf_model = self.db.get_setting('cloudflare_model', '@cf/mistral/mistral-7b-instruct-v0.1')
+            idx = self.cloudflare_model.findText(cf_model)
+            if idx >= 0:
+                self.cloudflare_model.setCurrentIndex(idx)
+            
+            # Establecer visibilidad inicial de grupos
+            self._on_provider_changed(self.ai_provider_combo.currentIndex())
+
             
             # Estado de conexión
             if self.mt5.is_connected():
@@ -496,10 +619,18 @@ class SettingsDialog(QDialog):
                 'trailing_activation': self.trailing_activation.value(),
                 'trailing_distance': self.trailing_distance.value(),
                 
+                # AI Provider
+                'ai_provider': 'cloudflare' if self.ai_provider_combo.currentIndex() == 1 else 'ollama',
+                
                 # Ollama
                 'ollama_url': self.ollama_url.text(),
                 'ollama_model': self.ollama_model.currentText(),
-                'enable_ia': self.enable_ia.isChecked()
+                'enable_ia': self.enable_ia.isChecked(),
+                
+                # Cloudflare
+                'cloudflare_account_id': self.cloudflare_account_id.text().strip(),
+                'cloudflare_api_token': self.cloudflare_api_token.text().strip(),
+                'cloudflare_model': self.cloudflare_model.currentText()
             }
             
             # Guardar en BD
