@@ -36,13 +36,17 @@ class TrailingStopManager(QObject):
         Args:
             symbol: Símbolo a verificar
         """
-        # Verificar si trailing está habilitado
-        if not self.db.get_setting('enable_trailing_stop', False):
+        # En modo frecuencia + let_winners_run, trailing siempre activo
+        freq = bool(self.db.get_setting('frequency_scalp_mode', False))
+        let_run = bool(self.db.get_setting('let_winners_run', True))
+        if not self.db.get_setting('enable_trailing_stop', False) and not (freq and let_run):
             return
         
         # Obtener parámetros
         activation_pips = self.db.get_setting('trailing_activation', 100)
         distance_pips = self.db.get_setting('trailing_distance', 50)
+        # Activación también por $ (más fiable en sintéticos que "pips")
+        activation_usd = float(self.db.get_setting('micro_profit_usd', 0.5) or 0.5)
         
         # Obtener posiciones abiertas
         positions = mt5.positions_get(symbol=symbol)
@@ -51,9 +55,13 @@ class TrailingStopManager(QObject):
             return
         
         for position in positions:
-            self._process_position(position, activation_pips, distance_pips)
+            self._process_position(
+                position, activation_pips, distance_pips, activation_usd
+            )
     
-    def _process_position(self, position, activation_pips: int, distance_pips: int):
+    def _process_position(
+        self, position, activation_pips: int, distance_pips: int, activation_usd: float
+    ):
         """Procesa una posición individual para trailing stop."""
         ticket = position.ticket
         symbol = position.symbol
@@ -61,6 +69,7 @@ class TrailingStopManager(QObject):
         open_price = position.price_open
         current_sl = position.sl
         current_price = position.price_current
+        profit_usd = float(position.profit or 0)
         
         # Obtener info del símbolo
         symbol_info = mt5.symbol_info(symbol)
@@ -69,6 +78,9 @@ class TrailingStopManager(QObject):
         
         point = symbol_info.point
         digits = symbol_info.digits
+        stops = int(symbol_info.trade_stops_level or 0)
+        # Distancia de trail al menos stops_level del broker
+        distance_pips = max(int(distance_pips), int(stops * 1.1) if stops else int(distance_pips))
         
         # Calcular profit en pips
         if position_type == 0:  # BUY
@@ -86,24 +98,27 @@ class TrailingStopManager(QObject):
         
         tracking = self.positions_tracking[ticket]
         
-        # Verificar activación
-        if not tracking['activated'] and profit_pips >= activation_pips:
-            logger.info(f"[SCALPING] ✅ Trailing activado para {symbol} (Profit: {profit_pips} pips)")
+        # Activar por pips O por profit en USD (dejar correr cuando ya gana)
+        should_activate = (
+            profit_pips >= activation_pips or profit_usd >= activation_usd
+        )
+        if not tracking['activated'] and should_activate:
+            logger.info(
+                f"[TRAIL] Activado {symbol} (pips={profit_pips}, ${profit_usd:.2f})"
+            )
             tracking['activated'] = True
             tracking['activation_price'] = current_price
         
         # Si está activado, mover SL
         if tracking['activated']:
-            # LÓGICA ESPECIAL: Primera actualización a CERO RIESGO
+            # Primera: intentar BE+ (cero riesgo). Si stops no lo permiten, trail normal.
             if tracking['first_update']:
                 new_sl = self._calculate_zero_risk_sl(
-                    position_type, open_price, point, digits
+                    position_type, open_price, point, digits, stops, current_price
                 )
-                tracking['first_update'] = False  # Ya no es la primera
-                
-                logger.info(f"[SCALPING] 🛡️ PRIMERA ACTUALIZACIÓN - SL a cero riesgo (entrada + 1 pip)")
+                tracking['first_update'] = False
+                logger.info(f"[TRAIL] Primera SL (proteger ganancia) → {new_sl}")
             else:
-                # Actualizaciones siguientes: distancia normal
                 new_sl = self._calculate_new_sl(
                     position_type, current_price, distance_pips, point, digits
                 )
@@ -120,23 +135,35 @@ class TrailingStopManager(QObject):
                 success = self._modify_sl(ticket, new_sl)
                 
                 if success:
-                    logger.info(f"[SCALPING] 📈 SL actualizado para {symbol} a {new_sl}")
+                    logger.info(f"[TRAIL] SL {symbol} → {new_sl}")
                     self.trailing_updated.emit(symbol, new_sl)
     
-    def _calculate_zero_risk_sl(self, position_type: int, open_price: float, 
-                                  point: float, digits: int) -> float:
+    def _calculate_zero_risk_sl(
+        self,
+        position_type: int,
+        open_price: float,
+        point: float,
+        digits: int,
+        stops_level: int = 0,
+        current_price: float = 0.0,
+    ) -> float:
         """
-        Calcula SL de cero riesgo: precio_entrada + 1 pip.
-        
-        Garantiza que la operación esté en profit mínimo aunque el mercado retroceda.
+        SL de protección: por encima/abajo de la entrada si el recorrido lo permite.
+        Si stops_level lo impide, trail desde precio actual a distancia mínima.
         """
+        buffer = max(point * 10, abs(open_price) * 0.00005)
+        min_dist = (stops_level * point * 1.05) if stops_level else point * 10
+
         if position_type == 0:  # BUY
-            # SL = Entrada + 1 pip (asegura profit mínimo)
-            new_sl = open_price + point
+            be_sl = open_price + buffer
+            # Debe respetar distancia al precio actual
+            trail_sl = current_price - min_dist if current_price else be_sl
+            new_sl = max(be_sl, trail_sl) if current_price >= open_price + min_dist else trail_sl
         else:  # SELL
-            # SL = Entrada - 1 pip
-            new_sl = open_price - point
-        
+            be_sl = open_price - buffer
+            trail_sl = current_price + min_dist if current_price else be_sl
+            new_sl = min(be_sl, trail_sl) if current_price <= open_price - min_dist else trail_sl
+
         return round(new_sl, digits)
     
     def _calculate_new_sl(self, position_type: int, current_price: float, 

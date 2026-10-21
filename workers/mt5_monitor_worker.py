@@ -5,6 +5,7 @@ Worker thread para monitorear posiciones MT5 y aplicar trailing stops.
 from PyQt6.QtCore import QThread, pyqtSignal
 from models.mt5_connection import MT5Connection
 from workers.trailing_stop_manager import TrailingStopManager
+from workers.micro_profit_manager import MicroProfitManager
 from models.database import Database
 import time
 import logging
@@ -30,13 +31,18 @@ class MT5MonitorWorker(QThread):
         # Tracking de posiciones para detectar cierres
         self._last_positions = {}
         
-        # Manager de trailing stops
+        # Manager de trailing stops + micro cierres (modo frecuencia)
         self.trailing_manager = TrailingStopManager()
+        self.micro_manager = MicroProfitManager()
         
         # Database para settings
         self.db = Database()
         
-        logger.info(f"MT5MonitorWorker creado (intervalo: {interval}s)")
+        # En modo frecuencia monitorear más seguido (1s)
+        if self.db.get_setting("frequency_scalp_mode", False):
+            self.interval = min(interval, 1)
+        
+        logger.info(f"MT5MonitorWorker creado (intervalo: {self.interval}s)")
     
     def run(self):
         """Ciclo principal del monitor"""
@@ -73,6 +79,12 @@ class MT5MonitorWorker(QThread):
                     if account_info:
                         self.account_info_updated.emit(account_info)
                     
+                    # Micro-ganancia / micro-pérdida (prioridad en modo frecuencia)
+                    try:
+                        self.micro_manager.check_and_close()
+                    except Exception as e:
+                        logger.error(f"Error micro_profit_manager: {e}", exc_info=True)
+
                     # Aplicar trailing stops a todas las posiciones abiertas
                     self._check_trailing_stops()
                     

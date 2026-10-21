@@ -156,7 +156,62 @@ def calculate_volume_analysis(df, window=20):
     else:
         return "ESPERAR"
 
-def get_technical_summary(df_in):
+def calculate_cci(df, period=20):
+    tp = (df['high'] + df['low'] + df['close']) / 3
+    sma = tp.rolling(window=period).mean()
+    mad = tp.rolling(window=period).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    mad = mad.replace(0, 1e-8)
+    cci = (tp - sma) / (0.015 * mad)
+    val = float(cci.iloc[-1]) if not pd.isna(cci.iloc[-1]) else 0.0
+    if val < -100:
+        return "COMPRA", val
+    if val > 100:
+        return "VENTA", val
+    return "ESPERAR", val
+
+
+def calculate_momentum(prices, period=10):
+    mom = prices.diff(period)
+    val = float(mom.iloc[-1]) if not pd.isna(mom.iloc[-1]) else 0.0
+    # Umbral relativo al precio
+    px = float(prices.iloc[-1]) or 1.0
+    thr = px * 0.0008
+    if val > thr:
+        return "COMPRA", val
+    if val < -thr:
+        return "VENTA", val
+    return "ESPERAR", val
+
+
+def calculate_adx_trend(df, period=14):
+    """ADX simplificado + dirección DI."""
+    high, low, close = df['high'], df['low'], df['close']
+    up = high.diff()
+    down = -low.diff()
+    plus_dm = np.where((up > down) & (up > 0), up, 0.0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr = pd.concat([
+        (high - low),
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    atr = pd.Series(tr).rolling(window=period).mean()
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=period).mean() / atr.replace(0, np.nan)
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=period).mean() / atr.replace(0, np.nan)
+    dx = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
+    adx = dx.rolling(window=period).mean().iloc[-1]
+    pdi = plus_di.iloc[-1]
+    mdi = minus_di.iloc[-1]
+    if pd.isna(adx) or adx < 20:
+        return "ESPERAR", float(adx) if not pd.isna(adx) else 0.0
+    if pdi > mdi:
+        return "COMPRA", float(adx)
+    if mdi > pdi:
+        return "VENTA", float(adx)
+    return "ESPERAR", float(adx)
+
+
+def get_technical_summary(df_in, consensus_threshold: int = 5, expert_weights=None):
     if df_in is None or df_in.empty: 
         return {"error": "Datos vacios", "veredicto_matematico": "NEUTRAL", "confianza_matematica": 0}
     
@@ -204,11 +259,17 @@ def get_technical_summary(df_in):
         
         sr_signal = calculate_micro_sr(df)
         volatility_signal = calculate_volatility_analysis(df)
-        volume_signal = calculate_volume_analysis(df)
+        # En sintéticos Deriv el "volumen" es tick_volume sintético: ruido.
+        # Neutralizamos este voto para no contaminar el consenso.
+        volume_signal = "ESPERAR"
+        cci_signal, cci_val = calculate_cci(df)
+        mom_signal, _ = calculate_momentum(c)
+        adx_signal, adx_val = calculate_adx_trend(df)
         
         # Recomendaciones individuales
+        # RSI: umbrales un poco más estrictos (menos señales prematuras)
         experts = {
-            "RSI": "COMPRA" if rsi_val < 35 else "VENTA" if rsi_val > 65 else "ESPERAR",
+            "RSI": "COMPRA" if rsi_val < 30 else "VENTA" if rsi_val > 70 else "ESPERAR",
             "EMA_CROSS": ema_signal if ema_signal else "ESPERAR",
             "MACD": "COMPRA" if macd_val > signal_val else "VENTA" if macd_val < signal_val else "ESPERAR",
             "BOLLINGER": "COMPRA" if c.iloc[-1] < bb_l.iloc[-1] else "VENTA" if c.iloc[-1] > bb_u.iloc[-1] else "ESPERAR",
@@ -216,31 +277,57 @@ def get_technical_summary(df_in):
             "STOCHASTIC": stoch_signal if stoch_signal else "ESPERAR",
             "MICRO_SR": sr_signal if sr_signal else "ESPERAR",
             "VOLATILITY": volatility_signal if volatility_signal else "ESPERAR",
-            "VOLUME": volume_signal if volume_signal else "ESPERAR"
+            "VOLUME": volume_signal,
+            "CCI": cci_signal,
+            "MOMENTUM": mom_signal,
+            "ADX_TREND": adx_signal,
         }
         
-        # Conteo para veredicto final
+        weights = expert_weights or {}
+        buy_w = 0.0
+        sell_w = 0.0
+        total_w = 0.0
+        for name, vote in experts.items():
+            w = float(weights.get(name, 1.0))
+            total_w += w
+            if vote == "COMPRA":
+                buy_w += w
+            elif vote == "VENTA":
+                sell_w += w
+
         buys = sum(1 for v in experts.values() if v == "COMPRA")
         sells = sum(1 for v in experts.values() if v == "VENTA")
-        
-        # Total voters = 9 now
-        total_voters = 9
-        threshold = 5 # Majority
-        
-        veredicto = "ALCISTA" if buys >= threshold else "BAJISTA" if sells >= threshold else "NEUTRAL"
-        
-        # Calcular confianza basada en el consenso
-        votos_ganadores = max(buys, sells)
-        confianza = round((votos_ganadores / total_voters) * 100, 1)
+        total_voters = max(1, len(experts))
+        threshold = max(4, min(int(consensus_threshold), total_voters - 1))
+
+        # Consenso ponderado (reputación) con fallback a conteo simple
+        if total_w > 0 and weights:
+            buy_pct = buy_w / total_w
+            sell_pct = sell_w / total_w
+            need = threshold / total_voters
+            veredicto = (
+                "ALCISTA" if buy_pct >= need
+                else "BAJISTA" if sell_pct >= need
+                else "NEUTRAL"
+            )
+            confianza = round(max(buy_pct, sell_pct) * 100, 1)
+        else:
+            veredicto = "ALCISTA" if buys >= threshold else "BAJISTA" if sells >= threshold else "NEUTRAL"
+            votos_ganadores = max(buys, sells)
+            confianza = round((votos_ganadores / total_voters) * 100, 1)
         
         return {
             "experts": experts,
+            "expert_weights_used": {k: round(float(weights.get(k, 1.0)), 2) for k in experts},
             "veredicto_matematico": veredicto,
             "rsi": round(float(rsi_val), 1),
             "macd": "ALCISTA" if macd_val > signal_val else "BAJISTA",
             "heikin_ashi": ha_trend,
             "stoch_k": round(float(stoch_val), 1),
-            "confianza_matematica": confianza
+            "cci": round(float(cci_val), 1),
+            "adx": round(float(adx_val), 1) if adx_val else 0.0,
+            "confianza_matematica": confianza,
+            "votes_raw": {"buys": buys, "sells": sells},
         }
     except Exception as e:
         import traceback
@@ -252,7 +339,7 @@ def get_technical_summary(df_in):
             "error_details": error_details,
             "veredicto_matematico": "NEUTRAL",
             "confianza_matematica": 0,
-            "experts": {  # ← AGREGAR ESTO
+            "experts": {
                 "RSI": "ESPERAR",
                 "EMA_CROSS": "ESPERAR",
                 "MACD": "ESPERAR",
@@ -261,7 +348,10 @@ def get_technical_summary(df_in):
                 "STOCHASTIC": "ESPERAR",
                 "MICRO_SR": "ESPERAR",
                 "VOLATILITY": "ESPERAR",
-                "VOLUME": "ESPERAR"
+                "VOLUME": "ESPERAR",
+                "CCI": "ESPERAR",
+                "MOMENTUM": "ESPERAR",
+                "ADX_TREND": "ESPERAR",
             },
             "rsi": 50.0,
             "macd": "NEUTRAL",

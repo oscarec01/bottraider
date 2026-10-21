@@ -159,9 +159,9 @@ class SettingsDialog(QDialog):
         technical_layout.addRow("Período M5:", self.technical_period)
         
         self.expert_consensus = QSpinBox()
-        self.expert_consensus.setRange(3, 9)
+        self.expert_consensus.setRange(3, 12)
         self.expert_consensus.setValue(5)
-        self.expert_consensus.setSuffix(" de 9")
+        self.expert_consensus.setSuffix(" de 12")
         technical_layout.addRow("Consenso Requerido:", self.expert_consensus)
         
         layout.addWidget(technical_group)
@@ -171,9 +171,12 @@ class SettingsDialog(QDialog):
         interval_layout = QFormLayout(interval_group)
         
         self.analysis_interval = QSpinBox()
-        self.analysis_interval.setRange(30, 600)
-        self.analysis_interval.setValue(120)
+        self.analysis_interval.setRange(8, 600)
+        self.analysis_interval.setValue(10)
         self.analysis_interval.setSuffix(" segundos")
+        self.analysis_interval.setToolTip(
+            "En modo frecuencia/volátil se usa 8–15s (sin IA). Fuera de frecuencia puede ser mayor."
+        )
         interval_layout.addRow("Intervalo entre Análisis:", self.analysis_interval)
         
         layout.addWidget(interval_group)
@@ -230,10 +233,38 @@ class SettingsDialog(QDialog):
         self.min_confidence_ia.setValue(70)
         self.min_confidence_ia.setSuffix(" %")
         confidence_layout.addRow("Confianza Mínima IA:", self.min_confidence_ia)
+
+        self.confidence_threshold = QSpinBox()
+        self.confidence_threshold.setRange(40, 90)
+        self.confidence_threshold.setValue(55)
+        self.confidence_threshold.setSuffix(" %")
+        self.confidence_threshold.setToolTip("Umbral de confianza final del setup para ejecutar")
+        confidence_layout.addRow("Umbral Setup Final:", self.confidence_threshold)
+
+        self.min_setup_score = QSpinBox()
+        self.min_setup_score.setRange(40, 90)
+        self.min_setup_score.setValue(55)
+        self.min_setup_score.setSuffix(" pts")
+        self.min_setup_score.setToolTip("Calidad mínima del setup (Boom dip / Crash rally / Trend)")
+        confidence_layout.addRow("Score Mínimo Setup:", self.min_setup_score)
         
         self.enable_auto_trading = QCheckBox("Ejecutar trades automáticamente")
         self.enable_auto_trading.setChecked(True)
         confidence_layout.addRow("Auto-Trading:", self.enable_auto_trading)
+
+        self.capital_preservation = QCheckBox(
+            "Modo NO PERDER: solo setups muy claros (puede estar horas sin operar)"
+        )
+        self.capital_preservation.setChecked(False)
+        self.capital_preservation.setToolTip(
+            "Prioriza no perder: umbrales altos, bloquea señales conflictivas, "
+            "máximo 1 posición en la cuenta. Anula la agresividad del modo frecuencia."
+        )
+        confidence_layout.addRow("Capital first:", self.capital_preservation)
+
+        self.use_atr_stops = QCheckBox("SL adaptativo por ATR (recomendado)")
+        self.use_atr_stops.setChecked(True)
+        confidence_layout.addRow("Stops ATR:", self.use_atr_stops)
         
         layout.addWidget(confidence_group)
         
@@ -258,11 +289,20 @@ class SettingsDialog(QDialog):
         
         self.risk_reward_ratio = QDoubleSpinBox()
         self.risk_reward_ratio.setRange(1.0, 5.0)
-        self.risk_reward_ratio.setValue(3.0)
+        self.risk_reward_ratio.setValue(2.0)
         self.risk_reward_ratio.setSingleStep(0.5)
         self.risk_reward_ratio.setDecimals(1)
         self.risk_reward_ratio.setPrefix("1:")
+        self.risk_reward_ratio.setToolTip("1:2 es más realista en M5 que 1:3 con SL amplios")
         money_layout.addRow("Ratio Riesgo:Beneficio:", self.risk_reward_ratio)
+
+        self.max_daily_loss = QSpinBox()
+        self.max_daily_loss.setRange(0, 10000)
+        self.max_daily_loss.setValue(0)
+        self.max_daily_loss.setSuffix(" USD")
+        self.max_daily_loss.setSpecialValueText("Sin límite")
+        self.max_daily_loss.setToolTip("Si la pérdida del día alcanza este valor, no abre más trades")
+        money_layout.addRow("Pérdida Diaria Máxima:", self.max_daily_loss)
         
         layout.addWidget(money_group)
         
@@ -270,16 +310,81 @@ class SettingsDialog(QDialog):
         scalping_group = QGroupBox("📈 Scalping Avanzado")
         scalping_layout = QFormLayout(scalping_group)
         
+        self.frequency_scalp_mode = QCheckBox(
+            "Modo FRECUENCIA: muchas ops + proteger ganancias"
+        )
+        self.frequency_scalp_mode.setChecked(False)
+        self.frequency_scalp_mode.setToolTip(
+            "Ciclos cortos. Al ganar lo suficiente asegura con SL y deja correr."
+        )
+        scalping_layout.addRow("Modo Frecuencia:", self.frequency_scalp_mode)
+
+        self.let_winners_run = QCheckBox(
+            "Dejar correr ganancias (no cerrar al primer $; asegurar SL y trail)"
+        )
+        self.let_winners_run.setChecked(True)
+        self.let_winners_run.setToolTip(
+            "Si vas ganando: mueve SL a break-even+ y deja la op abierta. "
+            "Solo cierra si no se puede asegurar por reglas del broker."
+        )
+        scalping_layout.addRow("Dejar correr:", self.let_winners_run)
+
+        self.micro_profit_usd = QDoubleSpinBox()
+        self.micro_profit_usd.setRange(0.001, 50.0)
+        self.micro_profit_usd.setDecimals(3)
+        self.micro_profit_usd.setSingleStep(0.1)
+        self.micro_profit_usd.setValue(0.5)
+        self.micro_profit_usd.setPrefix("$ ")
+        self.micro_profit_usd.setToolTip(
+            "Cerrar en cuanto el profit flotante >= este valor. "
+            "Nota: con lote mínimo 1.0 en V100, $0.001 casi nunca es alcanzable "
+            "por el tamaño del tick; usa 0.10–0.50 en la práctica."
+        )
+        scalping_layout.addRow("Micro ganancia:", self.micro_profit_usd)
+
+        self.micro_loss_usd = QDoubleSpinBox()
+        self.micro_loss_usd.setRange(0.0, 100.0)
+        self.micro_loss_usd.setDecimals(3)
+        self.micro_loss_usd.setSingleStep(0.1)
+        self.micro_loss_usd.setValue(0.0)
+        self.micro_loss_usd.setPrefix("$ ")
+        self.micro_loss_usd.setSpecialValueText("OFF (usar solo SL broker)")
+        self.micro_loss_usd.setToolTip(
+            "0 = NO cortar pérdidas automáticamente (recomendado). "
+            "Un corte a -$1 en Boom cerraba todo en rojo y reentraba peor."
+        )
+        scalping_layout.addRow("Micro pérdida (corte):", self.micro_loss_usd)
+
+        self.max_trade_seconds = QSpinBox()
+        self.max_trade_seconds.setRange(10, 600)
+        self.max_trade_seconds.setValue(90)
+        self.max_trade_seconds.setSuffix(" s")
+        scalping_layout.addRow("Máx. tiempo por trade:", self.max_trade_seconds)
+
         self.scalper_mode = QCheckBox("Enfoque exclusivo en últimos 15 minutos M5")
         self.scalper_mode.setChecked(False)
         scalping_layout.addRow("Modo Scalper (M5):", self.scalper_mode)
         
         self.max_spread_pips = QSpinBox()
-        self.max_spread_pips.setRange(1, 100)
-        self.max_spread_pips.setValue(10)
-        self.max_spread_pips.setSuffix(" pips")
-        self.max_spread_pips.setToolTip("Rechazar órdenes si spread excede este valor")
-        scalping_layout.addRow("Spread Máximo Permitido:", self.max_spread_pips)
+        self.max_spread_pips.setRange(1, 500)
+        self.max_spread_pips.setValue(50)
+        self.max_spread_pips.setSuffix(" pts")
+        self.max_spread_pips.setToolTip(
+            "Solo Forex/XAUUSD. En Boom/Crash/Volatility se usa % del precio."
+        )
+        scalping_layout.addRow("Spread Máx (Forex pts):", self.max_spread_pips)
+
+        self.max_spread_pct = QDoubleSpinBox()
+        self.max_spread_pct.setRange(0.05, 2.0)
+        self.max_spread_pct.setValue(0.25)
+        self.max_spread_pct.setSingleStep(0.05)
+        self.max_spread_pct.setDecimals(2)
+        self.max_spread_pct.setSuffix(" %")
+        self.max_spread_pct.setToolTip(
+            "Sintéticos Deriv: rechaza si (ask-bid)/precio > este %. "
+            "Boom 1000 normal ~0.01%; Crash/V75 ~0.03–0.05%."
+        )
+        scalping_layout.addRow("Spread Máx (Sintéticos %):", self.max_spread_pct)
         
         self.enable_trailing_stop = QCheckBox("Activar Trailing Stop automático")
         self.enable_trailing_stop.setChecked(False)
@@ -315,7 +420,11 @@ class SettingsDialog(QDialog):
         provider_layout = QFormLayout(provider_group)
         
         self.ai_provider_combo = QComboBox()
-        self.ai_provider_combo.addItems(["Ollama (Local)", "Cloudflare Workers AI"])
+        self.ai_provider_combo.addItems([
+            "Ollama (Local)",
+            "Cloudflare Workers AI",
+            "OpenRouter",
+        ])
         self.ai_provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         provider_layout.addRow("Proveedor:", self.ai_provider_combo)
         
@@ -378,18 +487,85 @@ class SettingsDialog(QDialog):
         cloudflare_layout.addRow(cloudflare_info)
         
         layout.addWidget(self.cloudflare_group)
+
+        # ===== CONFIGURACIÓN OPENROUTER =====
+        self.openrouter_group = QGroupBox("OpenRouter (recomendada si Cloudflare falla)")
+        openrouter_layout = QFormLayout(self.openrouter_group)
+
+        self.openrouter_api_key = QLineEdit()
+        self.openrouter_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.openrouter_api_key.setPlaceholderText("sk-or-v1-...")
+        openrouter_layout.addRow("API Key:", self.openrouter_api_key)
+
+        self.openrouter_model = QComboBox()
+        self.openrouter_model.setEditable(True)
+        self.openrouter_model.addItems([
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "google/gemini-2.0-flash-001",
+            "anthropic/claude-3.5-sonnet",
+            "meta-llama/llama-3.1-8b-instruct",
+        ])
+        openrouter_layout.addRow("Modelo:", self.openrouter_model)
+
+        self.test_openrouter_btn = QPushButton("Test OpenRouter")
+        self.test_openrouter_btn.clicked.connect(self._test_openrouter_connection)
+        openrouter_layout.addRow(self.test_openrouter_btn)
+
+        openrouter_info = QLabel(
+            "API: https://openrouter.ai/api/v1/chat/completions — "
+            "gpt-4o-mini es más barato; gpt-4o más capaz."
+        )
+        openrouter_info.setStyleSheet("color: #aaa; padding: 5px;")
+        openrouter_info.setWordWrap(True)
+        openrouter_layout.addRow(openrouter_info)
+
+        layout.addWidget(self.openrouter_group)
         
         layout.addStretch()
         return widget
     
     def _on_provider_changed(self, index):
         """Maneja el cambio de proveedor de IA"""
-        if index == 0:  # Ollama
-            self.ollama_group.setVisible(True)
-            self.cloudflare_group.setVisible(False)
-        else:  # Cloudflare
-            self.ollama_group.setVisible(False)
-            self.cloudflare_group.setVisible(True)
+        self.ollama_group.setVisible(index == 0)
+        self.cloudflare_group.setVisible(index == 1)
+        self.openrouter_group.setVisible(index == 2)
+
+    def _test_openrouter_connection(self):
+        """Prueba la conexión a OpenRouter"""
+        api_key = self.openrouter_api_key.text().strip()
+        model = self.openrouter_model.currentText().strip()
+        if not api_key:
+            QMessageBox.warning(self, "Validación", "Ingresa la API Key de OpenRouter")
+            return
+
+        self.test_openrouter_btn.setEnabled(False)
+        self.test_openrouter_btn.setText("Probando...")
+        try:
+            from models.ai_provider import OpenRouterProvider
+            provider = OpenRouterProvider(api_key, model)
+            text = provider.query(
+                'Responde SOLO este JSON: {"ok": true, "provider": "openrouter"}',
+                timeout=45,
+                format_json=True,
+            )
+            if text:
+                QMessageBox.information(
+                    self,
+                    "Conexion Exitosa",
+                    f"OpenRouter OK.\nModelo: {model}\nRespuesta:\n{text[:300]}",
+                )
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Error",
+                    "OpenRouter no respondio. Revisa API key, creditos y modelo.",
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Excepcion:\n{e}")
+        finally:
+            self.test_openrouter_btn.setEnabled(True)
+            self.test_openrouter_btn.setText("Test OpenRouter")
     
     def _test_cloudflare_connection(self):
         """Prueba la conexión a Cloudflare Workers AI"""
@@ -470,26 +646,47 @@ class SettingsDialog(QDialog):
             self.sl_xauusd.setValue(self.db.get_setting('sl_xauusd', 300))
             self.tp_xauusd.setValue(self.db.get_setting('tp_xauusd', 600))
             self.min_confidence_ia.setValue(self.db.get_setting('min_confidence_ia', 70))
+            self.confidence_threshold.setValue(self.db.get_setting('confidence_threshold', 55))
+            self.min_setup_score.setValue(self.db.get_setting('min_setup_score', 55))
             self.enable_auto_trading.setChecked(self.db.get_setting('enable_auto_trading', True))
+            self.capital_preservation.setChecked(
+                self.db.get_setting('capital_preservation', False)
+            )
+            self.use_atr_stops.setChecked(self.db.get_setting('use_atr_stops', True))
             
             # Money Management
             self.risk_percentage.setValue(self.db.get_setting('risk_percentage', 1.0))
             self.daily_profit_target.setValue(self.db.get_setting('daily_profit_target', 0))
-            self.risk_reward_ratio.setValue(self.db.get_setting('risk_reward_ratio', 3.0))
+            self.risk_reward_ratio.setValue(self.db.get_setting('risk_reward_ratio', 2.0))
+            self.max_daily_loss.setValue(self.db.get_setting('max_daily_loss', 0))
             
-            # Scalping
+            # Scalping / frecuencia
+            self.frequency_scalp_mode.setChecked(
+                self.db.get_setting('frequency_scalp_mode', False)
+            )
+            self.let_winners_run.setChecked(
+                self.db.get_setting('let_winners_run', True)
+            )
+            self.micro_profit_usd.setValue(
+                float(self.db.get_setting('micro_profit_usd', 0.5))
+            )
+            self.micro_loss_usd.setValue(
+                float(self.db.get_setting('micro_loss_usd', 1.0))
+            )
+            self.max_trade_seconds.setValue(
+                int(self.db.get_setting('max_trade_seconds', 90))
+            )
             self.scalper_mode.setChecked(self.db.get_setting('scalper_mode', False))
-            self.max_spread_pips.setValue(self.db.get_setting('max_spread_pips', 10))
+            self.max_spread_pips.setValue(self.db.get_setting('max_spread_pips', 50))
+            self.max_spread_pct.setValue(self.db.get_setting('max_spread_pct', 0.25))
             self.enable_trailing_stop.setChecked(self.db.get_setting('enable_trailing_stop', False))
             self.trailing_activation.setValue(self.db.get_setting('trailing_activation', 300))  # Default 300 para Boom/Crash
             self.trailing_distance.setValue(self.db.get_setting('trailing_distance', 150))  # Default 150 para Boom/Crash
             
             # AI Provider
             ai_provider = self.db.get_setting('ai_provider', 'ollama')
-            if ai_provider == 'cloudflare':
-                self.ai_provider_combo.setCurrentIndex(1)
-            else:
-                self.ai_provider_combo.setCurrentIndex(0)
+            provider_idx = {'ollama': 0, 'cloudflare': 1, 'openrouter': 2}.get(ai_provider, 0)
+            self.ai_provider_combo.setCurrentIndex(provider_idx)
             
             # Ollama
             self.ollama_url.setText(self.db.get_setting('ollama_url', 'http://localhost:11434/api/generate'))
@@ -506,6 +703,15 @@ class SettingsDialog(QDialog):
             idx = self.cloudflare_model.findText(cf_model)
             if idx >= 0:
                 self.cloudflare_model.setCurrentIndex(idx)
+
+            # OpenRouter
+            self.openrouter_api_key.setText(self.db.get_setting('openrouter_api_key', ''))
+            or_model = self.db.get_setting('openrouter_model', 'openai/gpt-4o-mini')
+            idx = self.openrouter_model.findText(or_model)
+            if idx >= 0:
+                self.openrouter_model.setCurrentIndex(idx)
+            else:
+                self.openrouter_model.setEditText(or_model)
             
             # Establecer visibilidad inicial de grupos
             self._on_provider_changed(self.ai_provider_combo.currentIndex())
@@ -605,22 +811,65 @@ class SettingsDialog(QDialog):
                 'sl_xauusd': self.sl_xauusd.value(),
                 'tp_xauusd': self.tp_xauusd.value(),
                 'min_confidence_ia': self.min_confidence_ia.value(),
+                'confidence_threshold': (
+                    max(self.confidence_threshold.value(), 65)
+                    if self.capital_preservation.isChecked()
+                    else self.confidence_threshold.value()
+                ),
+                'min_setup_score': (
+                    max(self.min_setup_score.value(), 70)
+                    if self.capital_preservation.isChecked()
+                    else self.min_setup_score.value()
+                ),
                 'enable_auto_trading': self.enable_auto_trading.isChecked(),
+                'max_total_positions': (
+                    1 if (
+                        self.capital_preservation.isChecked()
+                        and not self.frequency_scalp_mode.isChecked()
+                    ) else 3
+                ),
+                'use_atr_stops': self.use_atr_stops.isChecked(),
                 
                 # Money Management
-                'risk_percentage': self.risk_percentage.value(),
+                'risk_percentage': (
+                    min(self.risk_percentage.value(), 0.5)
+                    if self.capital_preservation.isChecked()
+                    else self.risk_percentage.value()
+                ),
                 'daily_profit_target': self.daily_profit_target.value(),
                 'risk_reward_ratio': self.risk_reward_ratio.value(),
+                'max_daily_loss': self.max_daily_loss.value(),
                 
-                # Scalping
+                # Scalping / frecuencia
+                # Si activan frecuencia volátil, apaga "no perder" (son opuestos)
+                'frequency_scalp_mode': self.frequency_scalp_mode.isChecked(),
+                'capital_preservation': (
+                    False if self.frequency_scalp_mode.isChecked()
+                    else self.capital_preservation.isChecked()
+                ),
+                'let_winners_run': self.let_winners_run.isChecked(),
+                'micro_profit_usd': self.micro_profit_usd.value(),
+                'micro_loss_usd': self.micro_loss_usd.value(),
+                'max_trade_seconds': self.max_trade_seconds.value(),
+                'frequency_skip_ia': True,
                 'scalper_mode': self.scalper_mode.isChecked(),
                 'max_spread_pips': self.max_spread_pips.value(),
-                'enable_trailing_stop': self.enable_trailing_stop.isChecked(),
+                'max_spread_pct': self.max_spread_pct.value(),
+                'enable_trailing_stop': (
+                    True if self.let_winners_run.isChecked()
+                    else self.enable_trailing_stop.isChecked()
+                ),
                 'trailing_activation': self.trailing_activation.value(),
                 'trailing_distance': self.trailing_distance.value(),
+                'max_loss_streak': 2 if self.capital_preservation.isChecked() else 3,
+                'loss_streak_cooldown_sec': (
+                    900 if self.capital_preservation.isChecked() else 300
+                ),
                 
                 # AI Provider
-                'ai_provider': 'cloudflare' if self.ai_provider_combo.currentIndex() == 1 else 'ollama',
+                'ai_provider': {0: 'ollama', 1: 'cloudflare', 2: 'openrouter'}.get(
+                    self.ai_provider_combo.currentIndex(), 'ollama'
+                ),
                 
                 # Ollama
                 'ollama_url': self.ollama_url.text(),
@@ -630,7 +879,11 @@ class SettingsDialog(QDialog):
                 # Cloudflare
                 'cloudflare_account_id': self.cloudflare_account_id.text().strip(),
                 'cloudflare_api_token': self.cloudflare_api_token.text().strip(),
-                'cloudflare_model': self.cloudflare_model.currentText()
+                'cloudflare_model': self.cloudflare_model.currentText(),
+
+                # OpenRouter
+                'openrouter_api_key': self.openrouter_api_key.text().strip(),
+                'openrouter_model': self.openrouter_model.currentText().strip(),
             }
             
             # Guardar en BD

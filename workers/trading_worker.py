@@ -64,6 +64,24 @@ class TradingWorker(QThread):
                 if self._is_paused:
                     time.sleep(1)
                     continue
+
+                # Intervalo efectivo (modo frecuencia = ciclos cortos)
+                freq_mode = bool(self.db.get_setting("frequency_scalp_mode", False))
+                effective_interval = int(
+                    self.db.get_setting(
+                        "analysis_interval",
+                        15 if freq_mode else self.interval,
+                    )
+                )
+                if freq_mode:
+                    # Sin IA: ciclos agresivos (8–15s)
+                    effective_interval = max(
+                        8,
+                        min(
+                            int(self.db.get_setting("analysis_interval", 10) or 10),
+                            15,
+                        ),
+                    )
                 
                 # Verificar conexión MT5
                 if not self.mt5_conn.is_connected():
@@ -72,6 +90,34 @@ class TradingWorker(QThread):
                         "No conectado a MT5. Worker en espera..."
                     )
                     time.sleep(10)
+                    continue
+
+                # Si hay posición abierta, en modo frecuencia: gestionar + tick predicción
+                # (antes se saltaba el análisis y las cards quedaban en "Pendiente")
+                open_here = self.mt5_conn.get_positions(self.symbol)
+                if open_here and freq_mode:
+                    self.status_update.emit(
+                        self.symbol,
+                        f"Gestionando pos #{open_here[0]['ticket']} "
+                        f"(${open_here[0]['profit']:.2f})",
+                    )
+                    try:
+                        self._tick_prediction_while_managing()
+                    except Exception as tick_err:
+                        logger.debug(f"tick predicción: {tick_err}")
+                    time.sleep(2)
+                    continue
+
+                # Freno por racha de pérdidas (evita martingala accidental)
+                cooldown_until = int(
+                    self.db.get_setting(f"cooldown_until::{self.symbol}", 0) or 0
+                )
+                if cooldown_until and time.time() < cooldown_until:
+                    left = int(cooldown_until - time.time())
+                    self.status_update.emit(
+                        self.symbol, f"Pausa anti-racha ({left}s)"
+                    )
+                    time.sleep(min(5, max(1, left)))
                     continue
                 
                 # ==================== ANÁLISIS ====================
@@ -104,6 +150,37 @@ class TradingWorker(QThread):
                     
                     # ==================== EJECUCIÓN ====================
                     if final_action in ["COMPRA", "VENTA"]:
+                        if not self.db.get_setting('enable_auto_trading', True):
+                            logger.info(
+                                f"⏸ [{self.symbol}] Señal {final_action} pero "
+                                f"auto-trading DESACTIVADO (solo análisis)"
+                            )
+                            self.status_update.emit(
+                                self.symbol,
+                                f"Señal {final_action} (auto-trading off)"
+                            )
+                            self.progress_update.emit(self.symbol, 100)
+                            for _ in range(self.interval):
+                                if not self._is_running or self._is_paused:
+                                    break
+                                time.sleep(1)
+                            continue
+
+                        # NO PERDER: solo 1 posición en toda la cuenta
+                        if bool(self.db.get_setting('capital_preservation', False)):
+                            all_pos = self.mt5_conn.get_positions() or []
+                            max_total = int(
+                                self.db.get_setting('max_total_positions', 1) or 1
+                            )
+                            if len(all_pos) >= max_total:
+                                self.status_update.emit(
+                                    self.symbol,
+                                    f"NO PERDER: ya hay {len(all_pos)} pos abierta(s)",
+                                )
+                                self.progress_update.emit(self.symbol, 100)
+                                time.sleep(self.interval)
+                                continue
+
                         self.status_update.emit(
                             self.symbol,
                             f"Ejecutando {final_action}..."
@@ -140,8 +217,8 @@ class TradingWorker(QThread):
                 self.progress_update.emit(self.symbol, 100)
                 
                 # ==================== ESPERA ====================
-                # Dormir en intervalos pequeños para poder detenerse rápido
-                for _ in range(self.interval):
+                # En modo frecuencia: pausa corta para encadenar muchas operaciones
+                for _ in range(effective_interval):
                     if not self._is_running or self._is_paused:
                         break
                     time.sleep(1)
@@ -191,10 +268,35 @@ class TradingWorker(QThread):
                     logger.info(f"🎯 ¡META DIARIA ALCANZADA! (${today_profit:.2f} >= ${daily_target:.2f})")
                     logger.info("⏸️ Deteniendo trading por hoy...")
                     return False, {'error': f'Meta diaria alcanzada: ${today_profit:.2f}'}
+
+            # Una sola posición abierta por símbolo (evita sobreexposición)
+            open_positions = self.mt5_conn.get_positions(self.symbol)
+            if open_positions:
+                logger.info(
+                    f"⏸ [{self.symbol}] Ya hay {len(open_positions)} posición(es) abierta(s). "
+                    f"No se abre otra."
+                )
+                return False, {'error': f'Posición ya abierta en {self.symbol}'}
+
+            # Límite de pérdidas diarias (protección de capital)
+            max_daily_loss = float(self.db.get_setting('max_daily_loss', 0) or 0)
+            if max_daily_loss > 0:
+                today_profit = self.mt5_conn.get_today_profit()
+                if today_profit <= -abs(max_daily_loss):
+                    logger.warning(
+                        f"🛑 Pérdida diaria límite alcanzada: ${today_profit:.2f} "
+                        f"(máx -${abs(max_daily_loss):.2f})"
+                    )
+                    return False, {'error': f'Límite de pérdida diaria: ${today_profit:.2f}'}
             
             # ==================== PARÁMETROS DE TRADING ====================
             # Obtener parámetros de gestión de riesgo desde BD
-            risk_percentage = self.db.get_setting('risk_percentage', 1.0)
+            risk_percentage = float(self.db.get_setting('risk_percentage', 1.0))
+            # Boom/Crash: cola de spike → arriesgar la mitad
+            sym_u = self.symbol.upper()
+            if 'BOOM' in sym_u or 'CRASH' in sym_u:
+                risk_percentage = max(0.25, risk_percentage * 0.5)
+                logger.info(f"⚠️ Boom/Crash: riesgo reducido a {risk_percentage}%")
             sl_pips, tp_pips = self.algorithm.get_sl_tp_params(self.symbol)
             
             
@@ -209,78 +311,86 @@ class TradingWorker(QThread):
             if warning:
                 logger.warning(warning)
             
-            # Obtener precio actual
-            price_data = self.mt5_conn.get_current_price(self.symbol)
-            if not price_data:
-                return False, {'error': 'No se pudo obtener precio actual'}
-            
-            price = price_data['ask'] if action == 'COMPRA' else price_data['bid']
-            
             # Obtener info del símbolo para calcular SL/TP
             symbol_info = self.mt5_conn.get_symbol_info(self.symbol)
             if not symbol_info:
                 return False, {'error': 'No se pudo obtener info del símbolo'}
             
             point = symbol_info['point']
-            digits = symbol_info.get('digits', 5)  # Por defecto 5 decimales
-            
-            # Verificar stops level del broker
+            digits = symbol_info.get('digits', 5)
+
+            # Tick fresco: MT5 valida stops vs Bid (BUY) / Ask (SELL), NO vs precio de entrada.
+            # Si SL se calcula solo desde Ask en COMPRA, el spread se "come" la distancia → 10016.
+            tick = mt5.symbol_info_tick(self.symbol)
+            if tick is None:
+                return False, {'error': 'No se pudo obtener tick actual'}
+
             symbol_info_mt5 = mt5.symbol_info(self.symbol)
-            if symbol_info_mt5:
-                stops_level = symbol_info_mt5.trade_stops_level
-                logger.info(f"   ⚠️ STOPS LEVEL del broker: {stops_level} puntos")
-                
-                # Ajustar pips con margen de seguridad generoso (20-30% sobre el mínimo)
-                # Esto evita errores por variaciones de precio entre fetch y ejecución
-                if sl_pips < stops_level:
-                    logger.warning(f"   ⚠️ sl_pips ({sl_pips}) < stops_level ({stops_level}). Ajustando...")
-                    sl_pips = int(stops_level * 1.2)  # 20% de margen de seguridad
-                
-                if tp_pips < stops_level:
-                    logger.warning(f"   ⚠️ tp_pips ({tp_pips}) < stops_level ({stops_level}). Ajustando...")
-                    tp_pips = int(stops_level * 1.3)  # 30% de margen (TP más lejos que SL)
-            
+            stops_level = int(symbol_info_mt5.trade_stops_level) if symbol_info_mt5 else 0
+            spread_points = int(round((tick.ask - tick.bid) / point)) if point else 0
+            # Distancia mínima en points: stops_level + spread + margen 30%
+            min_stop_points = int(max(stops_level, 1) + spread_points)
+            min_stop_points = int(min_stop_points * 1.3)
+
+            if sl_pips < min_stop_points:
+                logger.warning(
+                    f"   sl_pips ({sl_pips}) < min_stop_points ({min_stop_points}). Ajustando..."
+                )
+                sl_pips = min_stop_points
+            if tp_pips < min_stop_points:
+                logger.warning(
+                    f"   tp_pips ({tp_pips}) < min_stop_points ({min_stop_points}). Ajustando..."
+                )
+                tp_pips = max(tp_pips, int(sl_pips * float(self.db.get_setting('risk_reward_ratio', 2.0))))
+                tp_pips = max(tp_pips, min_stop_points)
+
+            logger.info(f"   STOPS LEVEL={stops_level} spread_pts={spread_points} min_pts={min_stop_points}")
             logger.info(f"📤 [{self.symbol}] Preparando orden {action}:")
-            logger.info(f"   ⚙️ PARÁMETROS FINALES:")
-            logger.info(f"   - sl_pips: {sl_pips}")
-            logger.info(f"   - tp_pips: {tp_pips}")
-            logger.info(f"   - point: {point}")
-            logger.info(f"   - digits: {digits}")
-            logger.info(f"   - precio: {price}")
-            
-            # Calcular SL y TP
+            logger.info(f"   sl_pts={sl_pips} tp_pts={tp_pips} point={point} digits={digits}")
+            logger.info(f"   bid={tick.bid} ask={tick.ask}")
+
             if action == 'COMPRA':
-                sl = price - (sl_pips * point)
+                price = tick.ask
+                # SL debe quedar por debajo del Bid al menos stops_level points
+                sl_from_entry = price - (sl_pips * point)
+                sl_from_bid = tick.bid - (stops_level * point * 1.2) if stops_level else sl_from_entry
+                sl = min(sl_from_entry, sl_from_bid)
                 tp = price + (tp_pips * point)
+                # TP también respeta distancia mínima desde Ask
+                if (tp - tick.ask) < (stops_level * point):
+                    tp = tick.ask + (min_stop_points * point)
             else:  # VENTA
-                sl = price + (sl_pips * point)
+                price = tick.bid
+                sl_from_entry = price + (sl_pips * point)
+                sl_from_ask = tick.ask + (stops_level * point * 1.2) if stops_level else sl_from_entry
+                sl = max(sl_from_entry, sl_from_ask)
                 tp = price - (tp_pips * point)
-            
-            logger.info(f"   🧮 CÁLCULO:")
-            if action == 'COMPRA':
-                logger.info(f"   - SL = {price} - ({sl_pips} * {point}) = {price} - {sl_pips * point} = {sl}")
-                logger.info(f"   - TP = {price} + ({tp_pips} * {point}) = {price} + {tp_pips * point} = {tp}")
-            else:  # VENTA
-                logger.info(f"   - SL = {price} + ({sl_pips} * {point}) = {price} + {sl_pips * point} = {sl}")
-                logger.info(f"   - TP = {price} - ({tp_pips} * {point}) = {price} - {tp_pips * point} = {tp}")
-            
-            logger.info(f"   [PASO 1] Valores calculados:")
-            logger.info(f"   - Precio: {price}")
-            logger.info(f"   - SL inicial: {sl}")
-            logger.info(f"   - TP inicial: {tp}")
-            logger.info(f"   - Parámetros: SL_pips={sl_pips}, TP_pips={tp_pips}, Point={point}, Dígitos={digits}")
-            
-            # NORMALIZACIÓN SIMPLE - Exactamente como en el script de diagnóstico que FUNCIONÓ
+                if (tick.bid - tp) < (stops_level * point):
+                    tp = tick.bid - (min_stop_points * point)
+
             price = round(price, digits)
             sl = round(sl, digits)
             tp = round(tp, digits)
-            
-            logger.info(f"   [PASO FINAL] Valores normalizados con round():")
-            logger.info(f"   - Precio: {price}")
-            logger.info(f"   - SL: {sl}")
-            logger.info(f"   - TP: {tp}")
-            logger.info(f"   - Distancia SL: {abs(price - sl):.3f} ({abs(price - sl) / point:.0f} puntos)")
-            logger.info(f"   - Distancia TP: {abs(tp - price):.3f} ({abs(tp - price) / point:.0f} puntos)")
+
+            # Validación final local (evita 10016 obvio)
+            if action == 'COMPRA':
+                dist_sl_vs_bid = tick.bid - sl
+                if dist_sl_vs_bid < stops_level * point:
+                    sl = round(tick.bid - (min_stop_points * point), digits)
+                if tp <= price:
+                    tp = round(price + (min_stop_points * point), digits)
+            else:
+                dist_sl_vs_ask = sl - tick.ask
+                if dist_sl_vs_ask < stops_level * point:
+                    sl = round(tick.ask + (min_stop_points * point), digits)
+                if tp >= price:
+                    tp = round(price - (min_stop_points * point), digits)
+
+            logger.info(f"   FINAL price={price} SL={sl} TP={tp}")
+            logger.info(
+                f"   Dist SL vs entry={abs(price - sl):.5f} "
+                f"({abs(price - sl) / point:.0f} pts)"
+            )
 
             # Enviar orden
             result = self.mt5_conn.send_order(
@@ -391,6 +501,66 @@ Error MT5: {error_msg}
             logger.error(f"❌ [{self.symbol}] CRÍTICO: Error guardando trade: {e}")
             traceback.print_exc()
     
+    def _tick_prediction_while_managing(self):
+        """Actualiza predicción/reputación aunque haya posición abierta (modo volátil)."""
+        price_data = self.mt5_conn.get_current_price(self.symbol)
+        if not price_data:
+            return
+        price = float(price_data.get("bid") or price_data.get("last") or 0)
+        if price <= 0:
+            return
+        verification = self.algorithm._verify_previous_prediction(self.symbol, price)
+        # Si se cerró la pendiente, crear una nueva predicción liviana
+        if verification.get("status") in ("ACERTADA", "FALLIDA", "SIN_PREVIA"):
+            df = self.algorithm._get_recent_data(self.symbol, n=80)
+            if df is not None and not df.empty:
+                light = {
+                    "paso2": {"tendencia": "NEUTRAL", "confianza": 0},
+                    "paso3": {"rsi": 50, "veredicto_matematico": "NEUTRAL"},
+                }
+                # Reusar último análisis en BD si existe
+                last = self.db.get_last_analysis(self.symbol)
+                if last and last.get("details"):
+                    d = last["details"]
+                    light["paso2"] = d.get("paso2", light["paso2"])
+                    light["paso3"] = d.get("paso3", light["paso3"])
+                pred = self.algorithm._build_technical_prediction(self.symbol, df, light)
+                self.algorithm._store_pending_prediction(self.symbol, pred)
+                # Snapshot expertos del último panel
+                try:
+                    from models.expert_reputation import ExpertReputation
+                    experts = (light.get("paso3") or {}).get("experts") or {}
+                    if experts:
+                        ExpertReputation(self.db).snapshot_votes(
+                            self.symbol, experts, price
+                        )
+                except Exception:
+                    pass
+                result = {
+                    "symbol": self.symbol,
+                    "prediction_tick_only": True,
+                    "final_action": "ESPERAR",
+                    "confidence": 0,
+                    "reasoning": "Gestionando posición — tick predicción",
+                    "prediction": pred,
+                    "prediction_verification": verification,
+                    "paso2": light.get("paso2", {}),
+                    "paso3": light.get("paso3", {}),
+                }
+                self.analysis_complete.emit(self.symbol, result)
+        elif verification.get("status") == "EVALUANDO":
+            result = {
+                "symbol": self.symbol,
+                "prediction_tick_only": True,
+                "final_action": "ESPERAR",
+                "confidence": 0,
+                "reasoning": "Gestionando posición — evaluando predicción",
+                "prediction_verification": verification,
+                "paso2": {},
+                "paso3": {},
+            }
+            self.analysis_complete.emit(self.symbol, result)
+
     def stop(self):
         """Detiene el worker"""
         logger.info(f"🛑 Deteniendo worker para {self.symbol}...")

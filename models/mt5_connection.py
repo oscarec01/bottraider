@@ -31,7 +31,9 @@ class MT5Connection:
         self._connected = False
         self._account = None
         self._server = None
-        self._operation_lock = threading.Lock()
+        # RLock: send_order llama a get_current_spread() dentro del mismo hilo.
+        # Con Lock normal eso provoca deadlock y la UI se queda en "Ejecutando...".
+        self._operation_lock = threading.RLock()
         self._initialized = True
         logger.info("MT5Connection inicializado")
     
@@ -182,14 +184,25 @@ class MT5Connection:
             original_lot = lot_size
             
             # VALIDACIÓN ESPECIAL: Boom/Crash requieren mínimo 0.20 lotes (Deriv)
+            # y un tope bajo: el money-mgmt con contract_size=1 infla el lote (ej. 20.0).
+            from models.database import Database
+            db = Database()
             is_boom_crash = self._is_boom_crash_index(symbol)
             
             if is_boom_crash:
                 BOOM_CRASH_MIN_LOT = 0.20
+                BOOM_CRASH_MAX_LOT = float(db.get_setting('boom_crash_max_lot', 0.2))
                 
                 if lot_size < BOOM_CRASH_MIN_LOT:
                     lot_size = BOOM_CRASH_MIN_LOT
                     warning = f"⚠️ Boom/Crash: Lotaje ajustado a mínimo {BOOM_CRASH_MIN_LOT} lotes (requerido por broker)"
+                    logger.warning(warning)
+                if lot_size > BOOM_CRASH_MAX_LOT:
+                    warning = (
+                        f"⚠️ Boom/Crash: Lotaje {lot_size:.2f} > tope {BOOM_CRASH_MAX_LOT}. "
+                        f"Usando {BOOM_CRASH_MAX_LOT} (protege cuenta)."
+                    )
+                    lot_size = BOOM_CRASH_MAX_LOT
                     logger.warning(warning)
             else:
                 # Validar límites estándar para otros símbolos
@@ -199,6 +212,21 @@ class MT5Connection:
                 elif lot_size > vol_max:
                     lot_size = vol_max
                     warning = f"⚠️ Lotaje calculado ({original_lot:.4f}) > máximo ({vol_max}). Usando máximo."
+                # Tope de seguridad: por defecto 1.0 (V100 a veces exige min 1.0;
+                # 2.0 era demasiado agresivo para cuentas demo de aprendizaje).
+                soft_max = float(db.get_setting('max_lot_size', 1.0))
+                if lot_size > soft_max:
+                    warning = f"⚠️ Lotaje {lot_size:.4f} > soft-max {soft_max}. Capado."
+                    lot_size = soft_max
+                    logger.warning(warning)
+                # Si el broker exige min > soft_max, avisamos (no se puede operar más chico)
+                if vol_min > soft_max:
+                    warning = (
+                        f"⚠️ {symbol}: volume_min del broker ({vol_min}) > tope "
+                        f"configurado ({soft_max}). Usando mínimo del broker."
+                    )
+                    lot_size = vol_min
+                    logger.warning(warning)
 
             
             # Calcular decimales correctos
@@ -270,19 +298,18 @@ class MT5Connection:
                 logger.error(f"Error obteniendo profit diario: {e}")
                 return 0.0
     
-    def get_current_spread(self, symbol: str) -> tuple[float, int]:
+    def get_current_spread(self, symbol: str) -> tuple[float, int, float]:
         """
         Obtiene el spread actual del símbolo.
         
-        Args:
-            symbol: Símbolo a consultar
-            
         Returns:
-            (spread_price, spread_pips)
+            (spread_price, spread_points, spread_pct_of_mid)
+            Nota: en sintéticos Deriv, "points" ≠ pips de forex.
+            Boom 1000 point=0.0001 → spread normal ~17000 points.
         """
         if not self._connected:
             logger.debug("No conectado a MT5 para obtener spread")
-            return 0.0, 0
+            return 0.0, 0, 0.0
         
         with self._operation_lock:
             try:
@@ -290,16 +317,24 @@ class MT5Connection:
                 symbol_info = mt5.symbol_info(symbol)
                 
                 if not tick or not symbol_info:
-                    return 0.0, 0
+                    return 0.0, 0, 0.0
                 
                 spread_price = tick.ask - tick.bid
-                spread_pips = int(spread_price / symbol_info.point)
+                point = symbol_info.point or 0.00001
+                spread_points = int(spread_price / point)
+                mid = (tick.ask + tick.bid) / 2.0
+                spread_pct = (spread_price / mid) * 100.0 if mid > 0 else 0.0
                 
-                return spread_price, spread_pips
+                return spread_price, spread_points, spread_pct
             
             except Exception as e:
                 logger.error(f"Error obteniendo spread: {e}")
-                return 0.0, 0
+                return 0.0, 0, 0.0
+
+    def _is_synthetic_index(self, symbol: str) -> bool:
+        u = symbol.upper()
+        keys = ('BOOM', 'CRASH', 'VOLATILITY', 'STEP', 'JUMP')
+        return any(k in u for k in keys)
     
     def get_symbol_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
@@ -356,6 +391,16 @@ class MT5Connection:
             return None
         
         with self._operation_lock:
+            # Muchos sintéticos no están en Market Watch hasta seleccionarlos
+            info = mt5.symbol_info(symbol)
+            if info is None:
+                logger.error(f"Símbolo no existe en este broker: {symbol}")
+                return None
+            if not info.visible:
+                if not mt5.symbol_select(symbol, True):
+                    logger.error(f"No se pudo activar {symbol} en Market Watch")
+                    return None
+
             rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)
             
             if rates is None or len(rates) == 0:
@@ -443,21 +488,44 @@ class MT5Connection:
         
         with self._operation_lock:
             # ==================== VALIDACIÓN 1: Spread Máximo ====================
+            # En sintéticos Deriv el "point" es minúsculo: un spread normal son
+            # miles de points. Comparar contra 10 "pips" forex bloqueaba todo.
+            # Usamos % del precio medio (más justo entre Boom/Crash/V75/XAU).
             from models.database import Database
             db = Database()
-            
-            max_spread = db.get_setting('max_spread_pips', 10)
-            spread_price, spread_pips = self.get_current_spread(symbol)
-            
-            if spread_pips > max_spread:
-                logger.warning(f"⚠️ SPREAD ALTO: {spread_pips} pips > máximo {max_spread} pips")
-                logger.warning(f"   Orden rechazada para proteger capital en {symbol}")
-                return {
-                    'success': False, 
-                    'error': f'Spread muy alto: {spread_pips} pips (máx: {max_spread})'
-                }
-            
-            logger.info(f"✅ Spread OK: {spread_pips} pips (máx: {max_spread})")
+
+            spread_price, spread_points, spread_pct = self.get_current_spread(symbol)
+
+            if self._is_synthetic_index(symbol):
+                max_spread_pct = float(db.get_setting('max_spread_pct', 0.25))  # 0.25% del precio
+                if spread_pct > max_spread_pct:
+                    logger.warning(
+                        f"⚠️ SPREAD ALTO: {spread_pct:.4f}% > máx {max_spread_pct}% "
+                        f"({spread_points} pts, precio-diff={spread_price:.5f})"
+                    )
+                    return {
+                        'success': False,
+                        'error': (
+                            f'Spread muy alto: {spread_pct:.3f}% del precio '
+                            f'(máx: {max_spread_pct}%)'
+                        ),
+                    }
+                logger.info(
+                    f"✅ Spread OK: {spread_pct:.4f}% ({spread_points} pts, "
+                    f"máx {max_spread_pct}%)"
+                )
+            else:
+                # Forex / metales: umbral en points (legacy setting)
+                max_spread = int(db.get_setting('max_spread_pips', 50))
+                if spread_points > max_spread:
+                    logger.warning(
+                        f"⚠️ SPREAD ALTO: {spread_points} pts > máximo {max_spread}"
+                    )
+                    return {
+                        'success': False,
+                        'error': f'Spread muy alto: {spread_points} pts (máx: {max_spread})',
+                    }
+                logger.info(f"✅ Spread OK: {spread_points} pts (máx: {max_spread})")
             
             # ==================== VALIDACIÓN 2: Volumen ====================
             # Obtener info del símbolo para validación de volumen
@@ -555,8 +623,17 @@ class MT5Connection:
             
             # Enviar orden
             result = mt5.order_send(request)
+
+            if result is None:
+                err = mt5.last_error()
+                logger.error(f"order_send devolvió None: {err}")
+                return {'success': False, 'error': f'order_send None: {err}'}
             
             if result.retcode != mt5.TRADE_RETCODE_DONE:
+                logger.error(
+                    f"Orden rechazada: {result.retcode} {result.comment} "
+                    f"(vol={volume})"
+                )
                 return {
                     'success': False,
                     'error': f'Error {result.retcode}: {result.comment}'
@@ -570,6 +647,79 @@ class MT5Connection:
                 'volume': result.volume,
                 'price': result.price,
                 'deal': result.deal
+            }
+
+    def close_position(self, ticket: int, comment: str = "Micro close") -> Dict[str, Any]:
+        """
+        Cierra una posición por ticket (market deal contrario).
+        Usado por el modo frecuencia / micro-ganancia.
+        """
+        if not self._connected:
+            return {'success': False, 'error': 'No conectado a MT5'}
+
+        with self._operation_lock:
+            positions = mt5.positions_get(ticket=ticket)
+            if not positions:
+                return {'success': False, 'error': f'Posición {ticket} no encontrada'}
+
+            pos = positions[0]
+            symbol = pos.symbol
+            volume = pos.volume
+            tick = mt5.symbol_info_tick(symbol)
+            info = mt5.symbol_info(symbol)
+            if not tick or not info:
+                return {'success': False, 'error': 'Sin tick/info del símbolo'}
+
+            # BUY(0) se cierra con SELL al bid; SELL(1) con BUY al ask
+            if pos.type == mt5.ORDER_TYPE_BUY:
+                order_type = mt5.ORDER_TYPE_SELL
+                price = tick.bid
+            else:
+                order_type = mt5.ORDER_TYPE_BUY
+                price = tick.ask
+
+            filling_mode = info.filling_mode
+            if filling_mode & 2:
+                type_filling = mt5.ORDER_FILLING_IOC
+            elif filling_mode & 1:
+                type_filling = mt5.ORDER_FILLING_FOK
+            elif filling_mode & 4:
+                type_filling = mt5.ORDER_FILLING_RETURN
+            else:
+                type_filling = mt5.ORDER_FILLING_IOC
+
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": volume,
+                "type": order_type,
+                "position": ticket,
+                "price": price,
+                "deviation": 50,
+                "magic": pos.magic,
+                "comment": comment[:31],
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": type_filling,
+            }
+
+            result = mt5.order_send(request)
+            if result is None:
+                return {'success': False, 'error': f'close None: {mt5.last_error()}'}
+            if result.retcode != mt5.TRADE_RETCODE_DONE:
+                return {
+                    'success': False,
+                    'error': f'Error {result.retcode}: {result.comment}',
+                }
+
+            logger.info(
+                f"Cerrada pos {ticket} {symbol} vol={volume} @ {result.price} "
+                f"({comment}) profit_prev≈{pos.profit:.2f}"
+            )
+            return {
+                'success': True,
+                'ticket': ticket,
+                'price': result.price,
+                'profit': pos.profit,
             }
     
     def __del__(self):

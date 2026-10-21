@@ -318,8 +318,16 @@ class Database:
             verification = analysis_result.get('prediction_verification', {})
             
             if verification.get('had_prediction'):
-                accuracy = 'ACERTADA' if verification.get('was_accurate') else 'FALLIDA'
-                adjustment = verification.get('confidence_adjustment', 0)
+                status = verification.get('status', '')
+                if status == 'EVALUANDO' or verification.get('was_accurate') is None:
+                    accuracy = 'PENDIENTE'
+                    adjustment = 0
+                elif verification.get('was_accurate'):
+                    accuracy = 'ACERTADA'
+                    adjustment = verification.get('confidence_adjustment', 0)
+                else:
+                    accuracy = 'FALLIDA'
+                    adjustment = verification.get('confidence_adjustment', 0)
             else:
                 accuracy = 'PENDIENTE'
                 adjustment = 0

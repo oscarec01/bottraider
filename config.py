@@ -1,5 +1,6 @@
 # Configuración de IA - AI Provider Selection
-AI_PROVIDER = "ollama"  # Opciones: "ollama" o "cloudflare"
+# Opciones: "ollama", "cloudflare", "openrouter"
+AI_PROVIDER = "openrouter"
 
 # Ollama Configuration (Local)
 GEMINI_API_KEY = "TU_API_KEY" # Mantener por compatibilidad
@@ -11,6 +12,12 @@ CLOUDFLARE_ACCOUNT_ID = "8f296c9441738764c450954bfbcbc543"
 CLOUDFLARE_API_TOKEN = "gNP7mxp3g1glmJq8-Qi59fYm6rnzeDdCyJyHTp4N"
 CLOUDFLARE_MODEL = "@cf/mistral/mistral-7b-instruct-v0.1"
 CLOUDFLARE_API_BASE_URL = "https://api.cloudflare.com/client/v4"
+
+# OpenRouter (https://openrouter.ai/api/v1/chat/completions)
+# Preferir guardar la key en BD (Ajustes). Aquí solo fallback.
+OPENROUTER_API_KEY = ""
+OPENROUTER_MODEL = "openai/gpt-4o-mini"
+OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 # MAPEO DE SÍMBOLOS  (códigos cortos -> nombres completos de Deriv)
@@ -88,8 +95,8 @@ ACTIVOS_PERMITIDOS = [
 ]
 
 # CONFIGURACIÓN METATRADER 5 (Deriv Synthetic Account)
-MT5_ACCOUNT = 29514809  # Tu cuenta de Deriv
-MT5_PASSWORD = "Fuego.0921"
+MT5_ACCOUNT = 6352000  # Tu cuenta de Deriv
+MT5_PASSWORD = "Fuego.0921**"
 MT5_SERVER = "Deriv-Demo"  # O "Deriv-Server" para cuenta real
 
 # PARÁMETROS DE TRADING (Índices Sintéticos)

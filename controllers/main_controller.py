@@ -10,6 +10,9 @@ from controllers.symbol_controller import SymbolController
 from models.database import Database
 from models.mt5_connection import MT5Connection
 from models.symbol_config import SymbolConfig
+from workers.mt5_monitor_worker import MT5MonitorWorker
+from workers.opportunity_scanner import OpportunityScanner
+from workers.quality_review_worker import QualityReviewWorker
 from utils.logger import get_logger
 import config
 
@@ -36,6 +39,9 @@ class MainController(QObject):
         
         # Diccionario de controladores por símbolo
         self.symbol_controllers: Dict[str, SymbolController] = {}
+        self.mt5_monitor = None  # type: MT5MonitorWorker | None
+        self.opportunity_scanner = None  # type: OpportunityScanner | None
+        self.quality_review = None  # type: QualityReviewWorker | None
         
         logger.info("MainController inicializado")
         
@@ -98,6 +104,7 @@ class MainController(QObject):
                 self.window.update_mt5_status(True, account)
                 self.window.show_status_message(f"✅ Conectado a MT5 (Cuenta: {account})", 5000)
                 logger.info("✅ Conexión MT5 exitosa")
+                self._start_mt5_monitor()
             else:
                 self.window.update_mt5_status(False)
                 self.window.show_warning(
@@ -504,6 +511,70 @@ class MainController(QObject):
         except Exception as e:
             logger.error(f"Error verificando ganancia diaria: {e}")
     
+    def _start_mt5_monitor(self):
+        """Inicia el monitor de posiciones (trailing stop / cierres)."""
+        try:
+            if self.mt5_monitor and self.mt5_monitor.isRunning():
+                return
+            self.mt5_monitor = MT5MonitorWorker(self.mt5, interval=3)
+            self.mt5_monitor.start()
+            logger.info("✅ MT5MonitorWorker iniciado (trailing stop activo si está habilitado)")
+            self._start_background_analyzers()
+        except Exception as e:
+            logger.error(f"No se pudo iniciar MT5MonitorWorker: {e}")
+
+    def _start_background_analyzers(self):
+        """Scanner de oportunidades + revisión lenta de calidad/reputación."""
+        try:
+            if not self.opportunity_scanner or not self.opportunity_scanner.isRunning():
+                self.opportunity_scanner = OpportunityScanner(interval_sec=40)
+                self.opportunity_scanner.recommendation.connect(self._on_scanner_recommendation)
+                self.opportunity_scanner.status.connect(
+                    lambda msg: self.window.show_status_message(msg, 8000)
+                )
+                self.opportunity_scanner.start()
+                logger.info("OpportunityScanner iniciado")
+            if not self.quality_review or not self.quality_review.isRunning():
+                self.quality_review = QualityReviewWorker(interval_sec=120)
+                self.quality_review.status.connect(
+                    lambda msg: self.window.show_status_message(msg, 6000)
+                )
+                self.quality_review.start()
+                logger.info("QualityReviewWorker iniciado")
+        except Exception as e:
+            logger.error(f"No se pudieron iniciar analizadores en paralelo: {e}")
+
+    def _on_scanner_recommendation(self, payload: dict):
+        best = (payload or {}).get("best")
+        if not best:
+            return
+        msg = (
+            f"🎯 Abrir: {best['symbol']} → {best['action']} "
+            f"(score {best['score']:.0f}, RSI {best.get('rsi', 0):.0f})"
+        )
+        self.window.show_status_message(msg, 12000)
+        logger.info(msg)
+
+    def _stop_mt5_monitor(self):
+        """Detiene el monitor de posiciones."""
+        if self.mt5_monitor:
+            try:
+                self.mt5_monitor.stop()
+                self.mt5_monitor.wait(3000)
+                logger.info("MT5MonitorWorker detenido")
+            except Exception as e:
+                logger.error(f"Error deteniendo MT5MonitorWorker: {e}")
+            self.mt5_monitor = None
+        for worker_attr in ("opportunity_scanner", "quality_review"):
+            worker = getattr(self, worker_attr, None)
+            if worker:
+                try:
+                    worker.stop()
+                    worker.wait(3000)
+                except Exception as e:
+                    logger.error(f"Error deteniendo {worker_attr}: {e}")
+                setattr(self, worker_attr, None)
+
     def cleanup(self):
         """Limpia recursos antes de cerrar la aplicación"""
         logger.info("⏱️ Iniciando limpieza de recursos...")
@@ -512,6 +583,8 @@ class MainController(QObject):
         if hasattr(self, 'daily_profit_timer'):
             self.daily_profit_timer.stop()
             logger.info("Timer de profit diario detenido")
+
+        self._stop_mt5_monitor()
         
         # Detener todos los workers
         logger.info("Deteniendo workers...")

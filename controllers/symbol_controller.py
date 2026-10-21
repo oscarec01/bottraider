@@ -156,6 +156,13 @@ class SymbolController(QObject):
         """
         if symbol != self.symbol:
             return
+
+        # Tick de predicción mientras hay posición: no pisar señal COMPRA/VENTA
+        if result.get('prediction_tick_only'):
+            self.card.update_prediction_status(
+                result.get('prediction_verification', {})
+            )
+            return
         
         final_action = result.get('final_action', 'ESPERAR')
         confidence = result.get('confidence', 0)

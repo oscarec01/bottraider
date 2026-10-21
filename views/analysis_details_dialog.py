@@ -292,14 +292,22 @@ class AnalysisDetailsDialog(QDialog):
             if verification.get('had_prediction'):
                 layout.addWidget(self._create_separator())
                 
-                was_accurate = verification.get('was_accurate', False)
+                was_accurate = verification.get('was_accurate', None)
                 adjustment = verification.get('confidence_adjustment', 0)
-                
-                status_text = "✅ ACERTADA" if was_accurate else "❌ FALLIDA"
-                status_color = "#2ecc71" if was_accurate else "#e74c3c"
+                status = verification.get('status', '')
+
+                if status == 'EVALUANDO' or was_accurate is None:
+                    status_text = f"⏳ {verification.get('details', 'Evaluando...')}"
+                    status_color = "#f39c12"
+                elif was_accurate:
+                    status_text = f"✅ ACERTADA ({adjustment:+d}%)"
+                    status_color = "#2ecc71"
+                else:
+                    status_text = f"❌ FALLIDA ({adjustment:+d}%) — autocorrección"
+                    status_color = "#e74c3c"
                 
                 self._add_info_row(layout, "📊 Predicción Anterior:", 
-                                 f"{status_text} ({adjustment:+d}%)", 
+                                 status_text, 
                                  status_color, bold_value=True)
         else:
             # No hay predicción

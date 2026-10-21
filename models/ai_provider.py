@@ -12,6 +12,27 @@ from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+# Norton/antivirus en Windows a menudo rompe la verificación SSL (CERTIFICATE_VERIFY_FAILED).
+# Se intenta primero con verify=True; si falla SSL, reintenta sin verificar (configurable).
+_SSL_VERIFY_FALLBACK = True
+
+
+def _http_post(url: str, *, headers=None, json_body=None, timeout: int = 30, verify: bool = True):
+    """POST con reintento si el antivirus rompe el store de certificados."""
+    try:
+        return requests.post(url, headers=headers, json=json_body, timeout=timeout, verify=verify)
+    except requests.exceptions.SSLError as e:
+        if verify and _SSL_VERIFY_FALLBACK:
+            logger.warning(
+                "SSL verify fallo (%s). Reintentando sin verificacion de certificado "
+                "(tipico con antivirus HTTPS). Desactiva el escaneo SSL o instala el CA del antivirus.",
+                e,
+            )
+            return requests.post(
+                url, headers=headers, json=json_body, timeout=timeout, verify=False
+            )
+        raise
+
 
 class AIProvider(ABC):
     """
@@ -90,7 +111,7 @@ class OllamaProvider(AIProvider):
             if format_json:
                 payload["format"] = "json"
             
-            response = requests.post(self.url, json=payload, timeout=timeout)
+            response = _http_post(self.url, json_body=payload, timeout=timeout)
             
             if response.status_code == 200:
                 result = response.json().get("response", "").strip()
@@ -184,7 +205,7 @@ class CloudflareProvider(AIProvider):
             }
             
             url = f"{self.base_url}{self.model}"
-            response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            response = _http_post(url, headers=headers, json_body=payload, timeout=timeout)
             
             if response.status_code == 200:
                 data = response.json()
@@ -264,6 +285,94 @@ class CloudflareProvider(AIProvider):
         return f"Cloudflare ({model_name})"
 
 
+class OpenRouterProvider(AIProvider):
+    """
+    Proveedor de IA usando OpenRouter (API compatible con OpenAI Chat Completions).
+    Docs: https://openrouter.ai/api/v1/chat/completions
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "openai/gpt-4o-mini",
+        base_url: str = "https://openrouter.ai/api/v1/chat/completions",
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = base_url
+        logger.info(f"OpenRouterProvider inicializado con modelo: {model}")
+
+    def query(self, prompt: str, timeout: int = 60, format_json: bool = False) -> str:
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/oscarec01/bottraider",
+                "X-Title": "BotTrader Deriv",
+            }
+
+            system = (
+                "Eres un analista de trading. Responde SOLO JSON válido, sin markdown."
+                if format_json
+                else "Eres un analista de trading conciso."
+            )
+            user_content = prompt
+            if format_json:
+                user_content = f"{prompt}\n\nResponde ÚNICAMENTE JSON válido."
+
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 512,
+            }
+
+            response = _http_post(
+                self.base_url, headers=headers, json_body=payload, timeout=timeout
+            )
+
+            if response.status_code != 200:
+                logger.error(
+                    f"OpenRouter error {response.status_code}: {response.text[:500]}"
+                )
+                return ""
+
+            data = response.json()
+            choices = data.get("choices") or []
+            if not choices:
+                logger.error(f"OpenRouter sin choices: {json.dumps(data)[:400]}")
+                return ""
+
+            message = choices[0].get("message") or {}
+            result = (message.get("content") or "").strip()
+            if result:
+                logger.info(f"OpenRouter OK ({len(result)} chars) model={self.model}")
+            return result
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"OpenRouter timeout after {timeout}s")
+            return ""
+        except Exception as e:
+            logger.error(f"Error en query OpenRouter: {e}")
+            return ""
+
+    def is_available(self) -> bool:
+        if not self.api_key:
+            return False
+        try:
+            # Ping ligero: listar modelos requiere auth; usamos un chat mínimo
+            text = self.query('Responde exactamente: {"ok":true}', timeout=20, format_json=True)
+            return bool(text)
+        except Exception:
+            return False
+
+    def get_name(self) -> str:
+        return f"OpenRouter ({self.model})"
+
+
 def get_ai_provider(db_instance) -> AIProvider:
     """
     Factory function para obtener el proveedor de IA configurado.
@@ -275,6 +384,16 @@ def get_ai_provider(db_instance) -> AIProvider:
         Una instancia del proveedor de IA configurado
     """
     provider_name = db_instance.get_setting('ai_provider', 'ollama')
+
+    if provider_name == 'openrouter':
+        api_key = db_instance.get_setting('openrouter_api_key', '')
+        model = db_instance.get_setting('openrouter_model', 'openai/gpt-4o-mini')
+        if not api_key:
+            logger.warning("OpenRouter sin API key. Intentando Ollama.")
+            provider_name = 'ollama'
+        else:
+            logger.info(f"Usando proveedor: OpenRouter ({model})")
+            return OpenRouterProvider(api_key, model)
     
     if provider_name == 'cloudflare':
         account_id = db_instance.get_setting('cloudflare_account_id', '')

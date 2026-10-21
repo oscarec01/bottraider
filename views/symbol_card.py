@@ -320,50 +320,7 @@ class SymbolCard(QFrame):
             # ========== ACTUALIZAR STATUS CON RAZONAMIENTO ==========
             self.update_status(f"💭 {reasoning}")
             
-            # ========== ACTUALIZAR PREDICCIÓN ANTERIOR ==========
-            verification = analysis_result.get('prediction_verification', {})
-            
-            if verification.get('had_prediction'):
-                was_accurate = verification.get('was_accurate', False)
-                adjustment = verification.get('confidence_adjustment', 0)
-                
-                if was_accurate:
-                    self.prediction_label.setText(
-                        f"🔮 Predicción Anterior: ✅ ACERTADA ({adjustment:+d}%)"
-                    )
-                    self.prediction_label.setStyleSheet("""
-                        color: #2ecc71; 
-                        background-color: rgba(46, 204, 113, 0.1);
-                        padding: 8px; 
-                        border-radius: 4px;
-                        font-weight: bold;
-                        font-size: 10px;
-                        margin: 5px;
-                    """)
-                else:
-                    self.prediction_label.setText(
-                        f"🔮 Predicción Anterior: ❌ FALLIDA ({adjustment:+d}%)"
-                    )
-                    self.prediction_label.setStyleSheet("""
-                        color: #e74c3c; 
-                        background-color: rgba(231, 76, 60, 0.1);
-                        padding: 8px; 
-                        border-radius: 4px;
-                        font-weight: bold;
-                        font-size: 10px;
-                        margin: 5px;
-                    """)
-            else:
-                # Primera predicción o sin predicción previa
-                self.prediction_label.setText("🔮 Predicción Anterior: Pendiente")
-                self.prediction_label.setStyleSheet("""
-                    color: #7f8c8d; 
-                    background-color: rgba(127, 140, 141, 0.1);
-                    padding: 8px; 
-                    border-radius: 4px;
-                    font-size: 10px;
-                    margin: 5px;
-                """)
+            self.update_prediction_status(analysis_result.get('prediction_verification', {}))
         
         except Exception as e:
             # Usar print como fallback si logger falla
@@ -384,6 +341,43 @@ class SymbolCard(QFrame):
         self._current_price = price
         self.price_value.setText(f"{price:.5f}")
     
+    def update_prediction_status(self, verification: dict):
+        """Actualiza solo el label de predicción (también usable con posición abierta)."""
+        verification = verification or {}
+        status = verification.get('status', '')
+        adjustment = verification.get('confidence_adjustment', 0)
+
+        if verification.get('had_prediction') and status == 'EVALUANDO':
+            self.prediction_label.setText(
+                f"🔮 Predicción: ⏳ {verification.get('details', 'Evaluando...')}"
+            )
+            self.prediction_label.setStyleSheet(
+                "color: #f39c12; background-color: rgba(243, 156, 18, 0.1);"
+                "padding: 8px; border-radius: 4px; font-size: 10px; margin: 5px;"
+            )
+        elif verification.get('had_prediction') and verification.get('was_accurate') is True:
+            self.prediction_label.setText(
+                f"🔮 Predicción Anterior: ✅ ACERTADA ({adjustment:+d}%)"
+            )
+            self.prediction_label.setStyleSheet(
+                "color: #2ecc71; background-color: rgba(46, 204, 113, 0.1);"
+                "padding: 8px; border-radius: 4px; font-weight: bold; font-size: 10px; margin: 5px;"
+            )
+        elif verification.get('had_prediction') and verification.get('was_accurate') is False:
+            self.prediction_label.setText(
+                f"🔮 Predicción Anterior: ❌ FALLIDA ({adjustment:+d}%) — autocorrección"
+            )
+            self.prediction_label.setStyleSheet(
+                "color: #e74c3c; background-color: rgba(231, 76, 60, 0.1);"
+                "padding: 8px; border-radius: 4px; font-weight: bold; font-size: 10px; margin: 5px;"
+            )
+        else:
+            self.prediction_label.setText("🔮 Predicción: esperando 1er ciclo (~3 min)")
+            self.prediction_label.setStyleSheet(
+                "color: #7f8c8d; background-color: rgba(127, 140, 141, 0.1);"
+                "padding: 8px; border-radius: 4px; font-size: 10px; margin: 5px;"
+            )
+
     def update_signal(self, signal: str, confidence: int = 0):
         """
         Actualiza la última señal y confianza.
@@ -433,6 +427,9 @@ class SymbolCard(QFrame):
         # Guardar análisis completo
         if full_analysis:
             self._full_analysis = full_analysis
+            self.update_prediction_status(
+                full_analysis.get('prediction_verification', {})
+            )
         
         # Colores según veredicto
         color_map = {
